@@ -47,6 +47,10 @@ The materials use the depth map for shape and the picture's own brightness for f
 
 ## Controls
 
+Press **H** in the app for this list as a page. Shortcuts follow the physical key positions, so they work on any keyboard layout (Armenian, Russian, ...), and holding a key doesn't repeat anything except the adjustments (arrows, + and −).
+
+<img src="docs/shortcuts.png" width="600" alt="Keyboard shortcuts page">
+
 | Key | Action |
 | --- | --- |
 | Esc or ⌘, | settings menu; the camera stops filming while it's open |
@@ -59,16 +63,23 @@ The materials use the depth map for shape and the picture's own brightness for f
 | ← / → | slower / faster rain (Matrix looks) |
 | D | 3D depth on / off (compare flat vs 3D) |
 | M | mirror on / off |
-| S | save a snapshot to Pictures › Matrix Eyes |
+| S | take a photo (shutter flash and sound; saved as a PNG named after the look); pressing it during a countdown cancels |
+| T | photo timer: off / 3 / 5 / 10 seconds |
 | F | full screen on / off |
-| H | show / hide the help |
+| H (or ?) | the keyboard shortcuts page (also a button in settings) |
 | ⌘Q | quit |
 
 ## Settings
 
 <img src="docs/settings.png" width="500" alt="Settings menu">
 
-Esc opens the settings menu and stops the camera (its light goes off); the picture keeps animating over the last frame behind the menu. Esc, Enter or a click outside the card resumes. Style, background, black hole, glyph size, brightness, rain speed, glow, 3D depth and mirror are saved between launches. Settings that don't apply to the current look (glyph size and rain speed outside Matrix, black hole without space) are greyed out.
+Esc opens the settings menu and stops the camera (its light goes off); the picture keeps animating over the last frame behind the menu. Esc, Enter or a click outside the card resumes. Style, background, black hole, photo folder, photo timer, glyph size, brightness, rain speed, glow, 3D depth and mirror are saved between launches. The **Shortcuts** button opens the keyboard shortcuts page. Settings that don't apply to the current look (glyph size and rain speed outside Matrix, black hole without space) are greyed out.
+
+## Photos
+
+Press **S** to take a photo of exactly what's on screen. The first time, Matrix Eyes asks where to save photos (a normal folder picker, which can create a new folder) and remembers your choice; the photo you just took is kept and saved there. Change the folder any time under Photos in the settings menu (Esc). If the folder is later deleted or can't be written to, it asks again.
+
+**Timer:** press **T** (or use Timer in settings) to choose a 3, 5 or 10 second countdown. Then **S** shows a big number in the middle of the screen, ticks each second and takes the photo at zero, so you can step back and pose. **S** or **Esc** cancels. The countdown numbers, hint and flash are overlays, so they never appear in the photo.
 
 ## Build from source
 
@@ -95,10 +106,11 @@ To try the look on a still image instead of the camera (prints GPU time per fram
 "Matrix Eyes.app/Contents/MacOS/MatrixEyes" --render-test input.png output.png 2940 1912 8
 ```
 
-`MATRIX_SELFTEST=1` launches the real app, cycles through every look, space, the black hole and the settings menu, then quits (exit code 0 means it all ran). Environment variables pick what `--render-test` renders: `MATRIX_STYLE` (`green`, `amber`, `chrome`, `quartz`, `copper`, `bronze`, `doodle`, `print`), `MATRIX_SPACE=1` for the space background, `MATRIX_BH=0` to leave out the black hole, `MATRIX_FLAT=1` to skip depth, `MATRIX_DEPTH_OUT=depth.png` / `MATRIX_MASK_OUT=mask.png` to save the depth map / person cut-out. To draw the settings menu to a PNG:
+`MATRIX_SELFTEST=1` launches the real app, cycles through every look, space, the black hole and the settings menu, then quits (exit code 0 means it all ran). `MATRIX_KEYTEST=<folder>` sends real key events (photo, timer, key repeat, a non-Latin keyboard layout, the shortcuts page, clicks reaching the settings) and logs each result; photos go to that folder. Neither touches your saved settings. Environment variables pick what `--render-test` renders: `MATRIX_STYLE` (`green`, `amber`, `chrome`, `quartz`, `copper`, `bronze`, `doodle`, `print`), `MATRIX_SPACE=1` for the space background, `MATRIX_BH=0` to leave out the black hole, `MATRIX_FLAT=1` to skip depth, `MATRIX_DEPTH_OUT=depth.png` / `MATRIX_MASK_OUT=mask.png` to save the depth map / person cut-out. To draw the settings menu to a PNG:
 
 ```bash
 "Matrix Eyes.app/Contents/MacOS/MatrixEyes" --settings-preview settings.png chrome
+"Matrix Eyes.app/Contents/MacOS/MatrixEyes" --shortcuts-preview shortcuts.png chrome
 ```
 
 ## How it works

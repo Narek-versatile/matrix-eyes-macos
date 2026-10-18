@@ -6,6 +6,8 @@ final class SettingsOverlay: NSView {
     var onChange: ((Preferences) -> Void)?
     var onResume: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onChoosePhotoFolder: (() -> Void)?
+    var onShowShortcuts: (() -> Void)?
 
     private var prefs = Preferences()
     private let card = NSView()
@@ -21,9 +23,14 @@ final class SettingsOverlay: NSView {
     // On/Off segments rather than NSSwitch, which can't take the theme color.
     private let depthControl = NSSegmentedControl(labels: ["On", "Off"], trackingMode: .selectOne, target: nil, action: nil)
     private let mirrorControl = NSSegmentedControl(labels: ["On", "Off"], trackingMode: .selectOne, target: nil, action: nil)
+    private let timerControl = NSSegmentedControl(labels: Preferences.timerChoices.map { $0 == 0 ? "Off" : "\($0) s" },
+                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let depthNote = NSTextField(labelWithString: "")
+    private let photoPath = NSTextField(labelWithString: "")
+    private let photoButton = NSButton(title: "Change…", target: nil, action: nil)
     private let resumeButton = NSButton(title: "Resume   esc", target: nil, action: nil)
     private let quitButton = NSButton(title: "Quit", target: nil, action: nil)
+    private let shortcutsButton = NSButton(title: "Shortcuts   H", target: nil, action: nil)
     private var valueLabels: [NSSlider: NSTextField] = [:]
     private var captions: [NSTextField] = []
     private var captionFor: [NSControl: NSTextField] = [:]
@@ -53,9 +60,14 @@ final class SettingsOverlay: NSView {
         depthControl.isEnabled = depthAvailable
         depthNote.stringValue = depthAvailable ? "" : "depth model not installed"
         mirrorControl.selectedSegment = p.mirror ? 0 : 1
+        timerControl.selectedSegment = Preferences.timerChoices.firstIndex(of: p.photoTimer) ?? 0
         refreshValues()
         applyTint()
         applyEnabledState()
+    }
+
+    func setPhotoFolder(_ text: String) {
+        photoPath.stringValue = text
     }
 
     func focusFirstControl() {
@@ -107,12 +119,20 @@ final class SettingsOverlay: NSView {
         styleControl.font = .systemFont(ofSize: 13)
         styleControl.widthAnchor.constraint(equalToConstant: 200).isActive = true
 
-        for control in [styleControl, backgroundControl, holeControl, depthControl, mirrorControl] as [NSControl] {
+        for control in [styleControl, backgroundControl, holeControl, depthControl, mirrorControl, timerControl] as [NSControl] {
             control.target = self
             control.action = #selector(controlChanged(_:))
         }
         depthNote.font = .systemFont(ofSize: 11)
         depthNote.textColor = .secondaryLabelColor
+        photoPath.font = .systemFont(ofSize: 12)
+        photoPath.textColor = .secondaryLabelColor
+        photoPath.lineBreakMode = .byTruncatingMiddle
+        photoPath.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        photoButton.bezelStyle = .rounded
+        photoButton.controlSize = .small
+        photoButton.target = self
+        photoButton.action = #selector(choosePhotoFolder)
 
         func caption(_ text: String, for control: NSControl) -> NSTextField {
             let label = NSTextField(labelWithString: text)
@@ -132,6 +152,8 @@ final class SettingsOverlay: NSView {
             [caption("GLOW", for: glowSlider), glowSlider, valueLabels[glowSlider]!],
             [caption("3D DEPTH", for: depthControl), NSStackView(views: [depthControl, depthNote]), empty()],
             [caption("MIRROR", for: mirrorControl), mirrorControl, empty()],
+            [caption("PHOTOS", for: photoButton), NSStackView(views: [photoButton, photoPath]), empty()],
+            [caption("TIMER", for: timerControl), timerControl, empty()],
         ])
         grid.rowSpacing = 15
         grid.columnSpacing = 18
@@ -146,7 +168,10 @@ final class SettingsOverlay: NSView {
         quitButton.bezelStyle = .rounded
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
-        let footer = NSStackView(views: [quitButton, NSView(), resumeButton])
+        shortcutsButton.bezelStyle = .rounded
+        shortcutsButton.target = self
+        shortcutsButton.action = #selector(showShortcuts)
+        let footer = NSStackView(views: [quitButton, shortcutsButton, NSView(), resumeButton])
         footer.orientation = .horizontal
 
         let content = NSStackView(views: [header, grid, footer])
@@ -182,6 +207,7 @@ final class SettingsOverlay: NSView {
         prefs.glow = glowSlider.floatValue
         if depthControl.isEnabled { prefs.depth3D = depthControl.selectedSegment == 0 }
         prefs.mirror = mirrorControl.selectedSegment == 0
+        prefs.photoTimer = Preferences.timerChoices[max(timerControl.selectedSegment, 0)]
         // Silver Surfer belongs in space: switching to it brings the background along.
         if sender === styleControl, prefs.style == .chrome, previousStyle != .chrome {
             prefs.space = true
@@ -193,6 +219,8 @@ final class SettingsOverlay: NSView {
         onChange?(prefs)
     }
 
+    @objc private func choosePhotoFolder() { onChoosePhotoFolder?() }
+    @objc private func showShortcuts() { onShowShortcuts?() }
     @objc private func resumeTapped() { onResume?() }
     @objc private func quitTapped() { onQuit?() }
 
@@ -225,7 +253,7 @@ final class SettingsOverlay: NSView {
         for label in captions { label.textColor = accent.withAlphaComponent(0.85) }
         for label in valueLabels.values { label.textColor = accent.withAlphaComponent(0.85) }
         for slider in [sizeSlider, brightnessSlider, speedSlider, glowSlider] { slider.trackFillColor = accent }
-        for control in [backgroundControl, holeControl, depthControl, mirrorControl] {
+        for control in [backgroundControl, holeControl, depthControl, mirrorControl, timerControl] {
             control.selectedSegmentBezelColor = accent.withAlphaComponent(0.55)
         }
         resumeButton.bezelColor = accent.withAlphaComponent(0.6)

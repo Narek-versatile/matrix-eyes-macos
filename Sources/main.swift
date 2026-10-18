@@ -150,11 +150,31 @@ func runSettingsPreview(_ args: [String]) -> Int32 {
     let overlay = SettingsOverlay()
     overlay.frame = NSRect(x: 0, y: 0, width: 1000, height: 640)
     overlay.show(prefs, depthAvailable: true)
+    overlay.setPhotoFolder("~/Pictures/Matrix Eyes")
     overlay.layoutSubtreeIfNeeded()
     guard let rep = overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds) else { return 1 }
     overlay.cacheDisplay(in: overlay.bounds, to: rep)
     guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
     return (try? png.write(to: URL(fileURLWithPath: out))) != nil ? 0 : 1
+}
+
+/// Draws the shortcuts page offscreen into a PNG.
+///   MatrixEyes --shortcuts-preview <output.png> [style]
+func runShortcutsPreview(_ args: [String]) -> Int32 {
+    guard let out = args.first else { return 2 }
+    _ = NSApplication.shared
+    let overlay = ShortcutsOverlay()
+    overlay.setTint((args.count > 1 ? Style(rawValue: args[1]) : nil)?.uiColor ?? Style.green.uiColor)
+    overlay.frame = NSRect(x: 0, y: 0, width: 1100, height: 700)
+    overlay.layoutSubtreeIfNeeded()
+    guard let rep = overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds) else { return 1 }
+    overlay.cacheDisplay(in: overlay.bounds, to: rep)
+    guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
+    return (try? png.write(to: URL(fileURLWithPath: out))) != nil ? 0 : 1
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--shortcuts-preview") {
+    exit(runShortcutsPreview(Array(CommandLine.arguments[(i + 1)...])))
 }
 
 if let i = CommandLine.arguments.firstIndex(of: "--settings-preview") {

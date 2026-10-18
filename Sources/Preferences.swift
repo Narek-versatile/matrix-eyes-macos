@@ -11,7 +11,9 @@ struct Preferences {
     var glow: Float = 1
     var depth3D = true
     var mirror = true
+    var photoTimer = 0            // seconds counted down before a photo; 0 = take it immediately
 
+    static let timerChoices = [0, 3, 5, 10]
     static let rowsRange: ClosedRange<Float> = 30...160
     static let exposureRange: ClosedRange<Float> = 0.25...3
     static let speedRange: ClosedRange<Float> = 0.2...4
@@ -29,6 +31,7 @@ struct Preferences {
         glow = r.glow
         depth3D = r.depthEnabled
         mirror = r.mirror
+        photoTimer = r.photoTimer
     }
 
     func apply(to r: Renderer, animated: Bool = true) {
@@ -41,6 +44,7 @@ struct Preferences {
         r.glow = glow
         r.depthEnabled = depth3D
         r.mirror = mirror
+        r.photoTimer = photoTimer
     }
 
     static func load(from d: UserDefaults = .standard) -> Preferences {
@@ -55,10 +59,16 @@ struct Preferences {
         if d.object(forKey: "glow") != nil { p.glow = d.float(forKey: "glow").clamped(to: glowRange) }
         if d.object(forKey: "depth3D") != nil { p.depth3D = d.bool(forKey: "depth3D") }
         if d.object(forKey: "mirror") != nil { p.mirror = d.bool(forKey: "mirror") }
+        if d.object(forKey: "photoTimer") != nil, timerChoices.contains(d.integer(forKey: "photoTimer")) {
+            p.photoTimer = d.integer(forKey: "photoTimer")
+        }
         return p
     }
 
     func save(to d: UserDefaults = .standard) {
+        // The developer self-test (MATRIX_SELFTEST) must not overwrite the user's real settings.
+        let env = ProcessInfo.processInfo.environment
+        guard env["MATRIX_SELFTEST"] == nil, env["MATRIX_KEYTEST"] == nil else { return }
         d.set(style.rawValue, forKey: "theme")
         d.set(space, forKey: "space")
         d.set(blackHole, forKey: "blackHole")
@@ -68,6 +78,7 @@ struct Preferences {
         d.set(glow, forKey: "glow")
         d.set(depth3D, forKey: "depth3D")
         d.set(mirror, forKey: "mirror")
+        d.set(photoTimer, forKey: "photoTimer")
     }
 }
 

@@ -82,6 +82,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     var speed: Float = 1
     var mirror = true
     var depthEnabled = true
+    /// Seconds of countdown before a photo (0 = none). Only stored here with the other settings.
+    var photoTimer = 0
     var glow: Float = 1
     /// Outer space instead of the room, with you cut out in front of it.
     var spaceEnabled = false
