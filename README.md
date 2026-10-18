@@ -95,3 +95,7 @@ Set `MATRIX_THEME=amber` for the amber palette, `MATRIX_FLAT=1` to skip depth, o
   4. Code pass: picks a mapping per pixel from its normal (front / side / floor), lays falling code streams in those surface coordinates with partial perspective, lit by scene brightness, a key light, rim light and depth fog. Surfaces seen nearly edge-on fall back to the front mapping so they don't smear.
   5. Two-level bloom for the glow.
   6. Composite: the theme color (for green, the film's grade with red and blue at about half of green) rolls off toward white in the highlights, plus glow and a vignette.
+
+## License
+
+[MIT](LICENSE). The bundled depth model is Apache-2.0 (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). "The Matrix" and its imagery belong to their owners; this project is an unaffiliated fan tribute.
