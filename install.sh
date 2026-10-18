@@ -38,7 +38,7 @@ expected=$(awk '{print $1}' "$tmp/Matrix-Eyes.zip.sha256")
 actual=$(shasum -a 256 "$tmp/Matrix-Eyes.zip" | awk '{print $1}')
 [ "$expected" = "$actual" ] || fail "Checksum mismatch; the download may be damaged. Try again."
 
-echo "→ Installing to $dest…"
+echo "→ Installing to ${dest}…"
 ditto -x -k "$tmp/Matrix-Eyes.zip" "$tmp/unpacked"
 [ -d "$tmp/unpacked/$APP" ] || fail "The download didn't contain $APP."
 pkill -f "$APP/Contents/MacOS/MatrixEyes" 2>/dev/null && sleep 1 || true
