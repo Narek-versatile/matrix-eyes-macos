@@ -1,0 +1,12 @@
+# Build output
+/Matrix Eyes.app/
+/build/
+/dist/
+
+# Depth model (48 MB) — fetched by scripts/fetch-model.sh
+/Models/
+
+# Reference stills from the film (copyrighted, not needed to build)
+/Screenshot*.png
+
+.DS_Store

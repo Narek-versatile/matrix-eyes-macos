@@ -1,0 +1,419 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// Must match `Uniforms` in Renderer.swift field for field (all 32-bit floats).
+struct Uniforms {
+    float resX, resY;        // render target size in pixels
+    float time;              // seconds since launch
+    float cellH;             // screen-space glyph cell height in pixels (transition grid, sampling scale)
+    float cellAspect;        // cell width / height
+    float exposure;          // user brightness multiplier
+    float contrast;
+    float speed;             // rain speed multiplier
+    float transT;            // seconds since the last matrix on/off toggle
+    float transDir;          // 1 = transitioning into the matrix, 0 = back to raw camera
+    float camFade;           // 0 -> 1 as the camera feed comes up
+    float camScaleX, camScaleY; // aspect-fill crop of the camera image
+    float mirror;            // 1 = mirror horizontally (selfie view)
+    float glyphCount;
+    float atlasCols, atlasRows;
+    float smoothing;         // temporal smoothing of the luminance buffer
+    float lumW, lumH;        // luminance buffer size
+    // --- 3D
+    float tanX;              // tan(half horizontal field of view) of the camera
+    float camAspect;         // camera image width / height
+    float zNear, zFar;       // metres assigned to relative depth 1 and 0
+    float zRef;              // depth at which glyphs are cellH pixels tall
+    float gamma;             // 0 = true perspective, 1 = no perspective at all
+    float cellQ;             // glyph height in (compressed) world units
+    float depthFade;         // 0 = flat, 1 = full 3D (ramps in when depth first arrives)
+    float depthAlpha;        // per-frame temporal smoothing of depth
+    float deadband;          // relative depth change treated as noise
+    float fogK;              // how quickly far surfaces fade
+    // --- color theme
+    float baseR, baseG, baseB;  // glyph color; the tone curve rolls it off toward white
+    float hotR, hotG, hotB;     // stream heads and sparkles
+};
+
+struct VOut {
+    float4 pos [[position]];
+    float2 uv;               // 0..1, origin top-left
+};
+
+vertex VOut fullscreenVS(uint vid [[vertex_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2);
+    VOut o;
+    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = float2(p.x, 1.0 - p.y);
+    return o;
+}
+
+static float hash11(float p) {
+    p = fract(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return fract(p);
+}
+
+static float hash12(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Screen uv -> camera-image uv as displayed (cropped, not yet mirrored).
+static float2 dispUV(float2 uv, constant Uniforms& u) {
+    return (uv - 0.5) * float2(u.camScaleX, u.camScaleY) + 0.5;
+}
+
+// Displayed camera uv -> uv to sample camera-aligned textures with.
+static float2 texUV(float2 c, constant Uniforms& u) {
+    return u.mirror > 0.5 ? float2(1.0 - c.x, c.y) : c;
+}
+
+static float2 camUV(float2 uv, constant Uniforms& u) {
+    return texUV(dispUV(uv, u), u);
+}
+
+// View ray through camera-image uv c, with z = 1 (x right, y down, z forward).
+static float3 rayAt(float2 c, constant Uniforms& u) {
+    return float3((c.x - 0.5) * 2.0 * u.tanX, (c.y - 0.5) * 2.0 * u.tanX / u.camAspect, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Pass 1: camera -> smoothed luminance buffer (mipmapped afterwards, so the
+// code pass can read per-cell averages and the whole-frame mean for auto gain).
+
+fragment float4 lumFS(VOut in [[stage_in]],
+                      texture2d<float> cam [[texture(0)]],
+                      texture2d<float> prev [[texture(1)]],
+                      constant Uniforms& u [[buffer(0)]],
+                      sampler s [[sampler(0)]])
+{
+    float2 d = 0.25 / float2(u.lumW, u.lumH);
+    float3 c = cam.sample(s, camUV(in.uv + float2(-d.x, -d.y), u)).rgb
+             + cam.sample(s, camUV(in.uv + float2( d.x, -d.y), u)).rgb
+             + cam.sample(s, camUV(in.uv + float2(-d.x,  d.y), u)).rgb
+             + cam.sample(s, camUV(in.uv + float2( d.x,  d.y), u)).rgb;
+    float l = dot(c * 0.25, float3(0.2126, 0.7152, 0.0722));
+    float p = prev.sample(s, in.uv, level(0.0)).r;
+    return float4(mix(l, p, u.smoothing), 0.0, 0.0, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2: depth. Relative depth from the network -> metres, filtered over time.
+// A dead band ignores the network's small frame-to-frame flicker so static
+// surfaces hold still; real motion is followed quickly.
+
+fragment float4 depthFS(VOut in [[stage_in]],
+                        texture2d<float> raw [[texture(0)]],
+                        texture2d<float> prev [[texture(1)]],
+                        constant Uniforms& u [[buffer(0)]])
+{
+    int2 p = int2(in.pos.xy);
+    int2 size = int2(raw.get_width(), raw.get_height());
+    // Edge-preserving blur: irons out small bumps the network puts on flat walls (which make
+    // the code rows wobble) without bleeding depth across silhouettes.
+    float d0 = raw.read(uint2(p)).r;
+    float sum = 0.0, wsum = 0.0;
+    for (int y = -3; y <= 3; y++) {
+        for (int x = -3; x <= 3; x++) {
+            int2 q = clamp(p + int2(x, y) * 2, int2(0), size - 1);
+            float dq = raw.read(uint2(q)).r;
+            float dd = (dq - d0) / 0.035;
+            float w = exp(-float(x * x + y * y) / 8.0 - dd * dd);
+            sum += dq * w;
+            wsum += w;
+        }
+    }
+    float d = saturate(sum / wsum);
+    float z = 1.0 / mix(1.0 / u.zFar, 1.0 / u.zNear, d);
+    float old = prev.read(uint2(p)).r;
+    if (old <= 0.0) return float4(z, 0.0, 0.0, 1.0);
+    float rel = abs(z - old) / old;
+    float k = u.depthAlpha * smoothstep(u.deadband, u.deadband * 2.5, rel)
+            + 0.5 * smoothstep(0.1, 0.35, rel);
+    return float4(mix(old, z, saturate(k)), 0.0, 0.0, 1.0);
+}
+
+// Pass 3: geometry. Depth -> camera-space surface normal and silhouette edges.
+// Output: (depth, normal.x, normal.y, edge); normal.z is rebuilt as facing the camera.
+
+static float3 posAt(texture2d<float> depth, int2 q, int2 size, constant Uniforms& u) {
+    q = clamp(q, int2(0), size - 1);
+    float z = depth.read(uint2(q)).r;
+    return rayAt((float2(q) + 0.5) / float2(size), u) * z;
+}
+
+fragment float4 geoFS(VOut in [[stage_in]],
+                      texture2d<float> depth [[texture(0)]],
+                      constant Uniforms& u [[buffer(0)]])
+{
+    int2 size = int2(depth.get_width(), depth.get_height());
+    int2 p = int2(in.pos.xy);
+    const int r = 3;
+    float3 c = posAt(depth, p, size, u);
+    float3 l = posAt(depth, p - int2(r, 0), size, u);
+    float3 rt = posAt(depth, p + int2(r, 0), size, u);
+    float3 up = posAt(depth, p - int2(0, r), size, u);
+    float3 dn = posAt(depth, p + int2(0, r), size, u);
+
+    // One-sided differences on the smoother side keep normals from smearing across silhouettes.
+    float3 dx = abs(rt.z - c.z) < abs(c.z - l.z) ? rt - c : c - l;
+    float3 dy = abs(dn.z - c.z) < abs(c.z - up.z) ? dn - c : c - up;
+    float3 n = normalize(cross(dy, dx));
+    if (dot(n, c) > 0.0) n = -n;
+
+    float jump = max(max(abs(rt.z - c.z), abs(l.z - c.z)), max(abs(dn.z - c.z), abs(up.z - c.z))) / c.z;
+    float edge = smoothstep(0.05, 0.14, jump);
+    return float4(c.z, n.x, n.y, edge);
+}
+
+// ---------------------------------------------------------------------------
+// Pass 4: the digital rain, mapped onto the surfaces of the room in 3D.
+
+static float shapeLum(float L, float mean, constant Uniforms& u) {
+    // Auto gain: pull the frame average toward a fixed level, so the scene
+    // reads the same in a dim room or in daylight.
+    float gain = clamp(0.40 / max(mean, 0.02), 0.7, 5.0) * u.exposure;
+    float x = L * gain;
+    x = (x - 0.42) * u.contrast + 0.42;
+    return clamp(x, 0.0, 1.5);
+}
+
+struct Surface {
+    float Ln;        // shaped scene brightness
+    float lumEdge;   // brightness edges in the camera image
+    float shade;     // virtual key light on the surface
+    float outline;   // silhouettes and rim light
+    float nearBoost; // near objects glow brighter, like the figures in the film
+    float presence;  // baseline glow for near objects, so dark clothes and hair still read
+    float fog;       // far surfaces fade out
+    float blur;      // extra mip bias: depth of field for far surfaces
+};
+
+struct Code {
+    float v;     // brightness (HDR)
+    float w;     // whiteness (stream heads, sparkles)
+    float m;     // glyph coverage
+};
+
+// One code texture, laid out in surface coordinates g (in cells). Streams fall toward +g.y.
+static Code codeAt(float2 g, float2 gdx, float2 gdy, float seed, float speedMul, Surface sf,
+                   constant Uniforms& u, texture2d<float> atlas, sampler s, sampler glyphSampler)
+{
+    float2 ci = floor(g);
+    float colKey = ci.x + seed * 1013.0;
+
+    float trail = 0.0, isHead = 0.0;
+    for (int k = 0; k < 2; k++) {
+        float kk = colKey + float(k) * 517.0;
+        float h1 = hash11(kk * 0.731 + 0.17);
+        float speed = mix(4.0, 16.0, h1 * h1) * u.speed * speedMul;
+        float period = floor(mix(14.0, 46.0, hash11(kk * 1.913 + 4.1)));
+        float trailLen = period * mix(0.4, 0.95, hash11(kk * 3.17 + 9.2));
+        float offs = hash11(kk * 5.31 + 2.7) * 997.0;
+        float headRow = floor(u.time * speed + offs);
+        float d = headRow - ci.y;
+        float pc = d - period * floor(d / period);     // cells behind the head (0 = head)
+        float t = saturate(1.0 - pc / trailLen);
+        trail = max(trail, t * t * (k == 0 ? 1.0 : 0.8));
+        isHead = max(isHead, pc < 0.5 ? 1.0 : 0.0);
+    }
+
+    // Most cells hold their symbol for a while, a few churn fast, heads flicker constantly.
+    float cellKey = hash12(ci + seed * 17.0);
+    float rate = mix(0.12, 5.0, pow(hash12(ci * 1.37 + seed + 3.3), 6.0));
+    float epoch = floor(u.time * rate + cellKey * 13.0);
+    epoch = isHead > 0.5 ? floor(u.time * 16.0) + 9000.0 : epoch;
+    float glyph = floor(hash12(ci + float2(epoch * 1.618, seed * 7.0)) * u.glyphCount);
+    float flick = mix(0.6, 1.0, hash12(ci.yx + epoch * 0.37 + seed));
+
+    float2 grid = float2(u.atlasCols, u.atlasRows);
+    float2 tile = float2(fmod(glyph, u.atlasCols), floor(glyph / u.atlasCols));
+    float bias = exp2(sf.blur);
+    float c = atlas.sample(glyphSampler, (tile + fract(g)) / grid, gradient2d(gdx * bias / grid, gdy * bias / grid)).r;
+    // Minification softens strokes; re-sharpen so glyphs stay crisp and bright.
+    float m = saturate((c - 0.06) * 2.4);
+
+    float body = (pow(sf.Ln, 1.8) * 2.8 * sf.nearBoost + sf.presence) * sf.shade;
+    float lines = sf.lumEdge * 0.7 + sf.outline;
+    float v = (body * mix(0.12, 1.0, trail) + lines * mix(0.4, 1.0, trail) + trail * 0.1) * flick;
+    v += isHead * (0.35 + 1.3 * sf.Ln);
+
+    // Rare bright twinkles, like the white flecks floating in the film shot.
+    float sp = hash12(ci * 0.93 + floor(u.time * 2.5 + cellKey) * 11.7 + seed * 5.0);
+    float sparkle = sp > 0.9988 ? 1.0 : 0.0;
+    v += sparkle * 2.2;
+
+    Code r;
+    r.v = v * sf.fog * m;
+    r.w = saturate(isHead * 0.8 + sparkle);
+    r.m = m;
+    return r;
+}
+
+// Theme color: for the film's green, roughly half-strength red and blue, which the
+// tone curve in the composite pass rolls off into mint-white highlights.
+static float3 colorize(float v, float w, constant Uniforms& u) {
+    return mix(float3(u.baseR, u.baseG, u.baseB), float3(u.hotR, u.hotG, u.hotB), w) * v;
+}
+
+// Matrix on/off transition: each column gets a falling "front"; cells above the
+// front have switched over. Returns (matrix amount, is-front-cell).
+static float2 reveal(float2 ci, float rows, constant Uniforms& u) {
+    float delay = hash11(ci.x * 3.71 + 11.3) * 0.9;
+    float spd = rows * mix(0.55, 1.3, hash11(ci.x * 1.13 + 5.9));
+    float front = floor((u.transT - delay) * spd);
+    float passed = ci.y <= front ? 1.0 : 0.0;
+    float isFront = ci.y == front ? 1.0 : 0.0;
+    return float2(mix(1.0 - passed, passed, u.transDir), isFront);
+}
+
+fragment float4 codeFS(VOut in [[stage_in]],
+                       texture2d<float> lum [[texture(0)]],
+                       texture2d<float> atlas [[texture(1)]],
+                       texture2d<float> cam [[texture(2)]],
+                       texture2d<float> geo [[texture(3)]],
+                       constant Uniforms& u [[buffer(0)]],
+                       sampler s [[sampler(0)]],
+                       sampler glyphSampler [[sampler(1)]])
+{
+    float2 res = float2(u.resX, u.resY);
+    float2 px = in.uv * res;
+    float2 cd = dispUV(in.uv, u);
+    float2 ct = texUV(cd, u);
+
+    // Scene brightness and edges (screen space, roughly one glyph cell wide).
+    float mean = lum.sample(s, float2(0.5), level(14.0)).r;
+    float2 cs = float2(u.cellH * u.cellAspect, u.cellH);
+    float lod = max(log2(u.cellH * u.lumH / u.resY) - 0.5, 0.0);
+    float2 o = cs / res;
+    float L  = lum.sample(s, in.uv, level(lod)).r;
+    float lx = lum.sample(s, in.uv + float2(o.x, 0.0), level(lod)).r - lum.sample(s, in.uv - float2(o.x, 0.0), level(lod)).r;
+    float ly = lum.sample(s, in.uv + float2(0.0, o.y), level(lod)).r - lum.sample(s, in.uv - float2(0.0, o.y), level(lod)).r;
+    float gain = clamp(0.40 / max(mean, 0.02), 0.7, 5.0) * u.exposure;
+
+    // Geometry at this pixel.
+    float4 gd = geo.sample(s, ct);
+    float3 n = float3(gd.y, gd.z, -sqrt(saturate(1.0 - dot(gd.yz, gd.yz))));
+    if (u.mirror > 0.5) n.x = -n.x;
+    float z = mix(u.zRef, max(gd.x, 0.05), u.depthFade);
+    n = normalize(mix(float3(0.0, 0.0, -1.0), n, u.depthFade));
+    float depthEdge = gd.w * u.depthFade;
+
+    float3 P = rayAt(cd, u) * z;
+    // Partial perspective: far surfaces get smaller glyphs, but not so small they turn to noise.
+    float3 Q = P * pow(u.zRef / z, u.gamma);
+    float2 cq = float2(u.cellQ * u.cellAspect, u.cellQ);
+
+    // Three ways to lay code on a surface, picked by which way it faces:
+    //   facing us (walls, faces, bodies): columns fall down the surface;
+    //   facing sideways (side walls, cheeks): columns at fixed depth, foreshortened, falling down;
+    //   facing up/down (floor, desk, ceiling): code streams along the surface toward the camera.
+    float2 gF = float2(Q.x, Q.y) / cq;
+    float2 gS = float2((n.x >= 0.0 ? 1.0 : -1.0) * Q.z, Q.y) / cq;
+    float2 gT = float2(Q.x, -Q.z) / (cq * float2(1.0, 1.6));   // taller cells offset the floor's foreshortening
+    // Derivatives are taken here, in uniform control flow, then passed into the branches.
+    float2 gFdx = dfdx(gF), gFdy = dfdy(gF);
+    float2 gSdx = dfdx(gS), gSdy = dfdy(gS);
+    float2 gTdx = dfdx(gT), gTdy = dfdy(gT);
+
+    float3 wt = pow(abs(n), float3(8.0));
+    // Where a surface is seen so edge-on that its cells shrink to a couple of pixels, the code
+    // turns into smeared ribbons; hand those pixels to the front mapping instead.
+    float sidePx = 1.0 / max(max(abs(gSdx.x), abs(gSdy.x)), max(abs(gSdx.y), abs(gSdy.y)) * u.cellAspect);
+    float topPx = 1.0 / max(max(abs(gTdx.x), abs(gTdy.x)), max(abs(gTdx.y), abs(gTdy.y)) * u.cellAspect);
+    float keepS = smoothstep(3.0, 7.0, sidePx), keepT = smoothstep(3.0, 7.0, topPx);
+    wt.z += wt.x * (1.0 - keepS) + wt.y * (1.0 - keepT);
+    wt.x *= keepS;
+    wt.y *= keepT;
+    wt.z += depthEdge * 4.0;        // keep silhouettes on the stable front mapping
+    wt /= (wt.x + wt.y + wt.z);
+
+    Surface sf;
+    sf.Ln = shapeLum(L, mean, u) * u.camFade;
+    sf.lumEdge = saturate(length(float2(lx, ly)) * gain * 2.2) * u.camFade;
+    float3 keyLight = normalize(float3(-0.45, -0.65, -0.6));
+    sf.shade = 0.35 + 0.9 * saturate(dot(n, keyLight));
+    float facing = saturate(-dot(n, normalize(P)));
+    float nearness = saturate((u.zRef * 2.2 - z) / (u.zRef * 1.5)) * u.depthFade;
+    float rim = pow(1.0 - facing, 3.0) * nearness;
+    sf.outline = (depthEdge * 1.3 + rim * 0.9) * (0.35 + 0.65 * saturate(sf.Ln * 1.5)) * u.camFade;
+    sf.nearBoost = 1.0 + 0.7 * nearness;
+    sf.presence = 0.45 * nearness * u.camFade;
+    sf.fog = exp(-max(z - u.zRef, 0.0) * u.fogK);
+    sf.blur = 0.8 * smoothstep(u.zRef * 1.8, u.zFar * 0.8, z) * u.depthFade;
+
+    float v = 0.0, w = 0.0, m = 0.0;
+    if (wt.z > 0.01) {
+        Code c = codeAt(gF, gFdx, gFdy, 0.0, 1.0, sf, u, atlas, s, glyphSampler);
+        v += c.v * wt.z; w += c.w * wt.z; m += c.m * wt.z;
+    }
+    if (wt.x > 0.01) {
+        Code c = codeAt(gS, gSdx, gSdy, 1.0, 1.0, sf, u, atlas, s, glyphSampler);
+        v += c.v * wt.x; w += c.w * wt.x; m += c.m * wt.x;
+    }
+    if (wt.y > 0.01) {
+        Code c = codeAt(gT, gTdx, gTdy, 2.0, 1.4, sf, u, atlas, s, glyphSampler);
+        v += c.v * wt.y; w += c.w * wt.y; m += c.m * wt.y;
+    }
+    float3 matrixCol = colorize(v, w, u);
+
+    float2 rv = reveal(floor(px / cs), u.resY / u.cellH, u);
+    float3 raw = cam.sample(s, ct).rgb * u.camFade;
+    float3 outc = mix(raw, matrixCol, rv.x);
+    outc = mix(outc, float3(u.hotR, u.hotG, u.hotB) * m * 2.2, rv.y);
+    return float4(outc, max(rv.x, rv.y));
+}
+
+// ---------------------------------------------------------------------------
+// Bloom: 4-tap downsample (only matrix pixels glow), separable 9-tap gaussian.
+
+fragment float4 downFS(VOut in [[stage_in]],
+                       texture2d<float> src [[texture(0)]],
+                       constant float2& texel [[buffer(0)]],
+                       sampler s [[sampler(0)]])
+{
+    float4 a = src.sample(s, in.uv + texel * float2(-1.0, -1.0));
+    float4 b = src.sample(s, in.uv + texel * float2( 1.0, -1.0));
+    float4 c = src.sample(s, in.uv + texel * float2(-1.0,  1.0));
+    float4 d = src.sample(s, in.uv + texel * float2( 1.0,  1.0));
+    float3 rgb = a.rgb * a.a + b.rgb * b.a + c.rgb * c.a + d.rgb * d.a;
+    return float4(rgb * 0.25, 1.0);
+}
+
+fragment float4 blurFS(VOut in [[stage_in]],
+                       texture2d<float> src [[texture(0)]],
+                       constant float2& dir [[buffer(0)]],
+                       sampler s [[sampler(0)]])
+{
+    const float w0 = 0.2270270270, w1 = 0.3162162162, w2 = 0.0702702703;
+    const float o1 = 1.3846153846, o2 = 3.2307692308;
+    float4 c = src.sample(s, in.uv) * w0;
+    c += (src.sample(s, in.uv + dir * o1) + src.sample(s, in.uv - dir * o1)) * w1;
+    c += (src.sample(s, in.uv + dir * o2) + src.sample(s, in.uv - dir * o2)) * w2;
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// Final composite: code + glow, filmic roll-off, vignette.
+
+fragment float4 compositeFS(VOut in [[stage_in]],
+                            texture2d<float> code [[texture(0)]],
+                            texture2d<float> bloomNear [[texture(1)]],
+                            texture2d<float> bloomFar [[texture(2)]],
+                            constant float& glow [[buffer(0)]],
+                            sampler s [[sampler(0)]])
+{
+    float4 c = code.read(uint2(in.pos.xy));
+    float3 bloom = (bloomNear.sample(s, in.uv).rgb * 0.7 + bloomFar.sample(s, in.uv).rgb * 0.5) * glow;
+
+    float3 graded = 1.0 - exp(-(c.rgb + bloom) * 1.25);
+    float2 q = in.uv - 0.5;
+    float vig = mix(0.5, 1.0, smoothstep(0.85, 0.2, length(q * float2(1.15, 1.0))));
+    graded *= vig;
+
+    float3 outc = mix(c.rgb + bloom * 0.6, graded, c.a);
+    return float4(outc, 1.0);
+}
