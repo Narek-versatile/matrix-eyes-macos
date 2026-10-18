@@ -42,6 +42,7 @@ struct Uniforms {
     float bhTanV;            // vertical tan(half fov) of the black-hole camera
     float bhElev;            // that camera's elevation above the accretion disk, radians
     float matrixLook;        // 1 for the Matrix styles
+    float bhDist;            // camera distance from the black hole (smaller = bigger hole)
 };
 
 struct CompositeParams {
@@ -311,20 +312,15 @@ static float2 reveal(float2 ci, float rows, constant Uniforms& u) {
     return float2(mix(1.0 - passed, passed, u.transDir), isFront);
 }
 
-fragment float4 codeFS(VOut in [[stage_in]],
-                       texture2d<float> lum [[texture(0)]],
-                       texture2d<float> atlas [[texture(1)]],
-                       texture2d<float> cam [[texture(2)]],
-                       texture2d<float> geo [[texture(3)]],
-                       texture2d<float> space [[texture(4)]],
-                       texture2d<float> mask [[texture(5)]],
-                       constant Uniforms& u [[buffer(0)]],
-                       sampler s [[sampler(0)]],
-                       sampler glyphSampler [[sampler(1)]])
+// Digital rain at a screen position: colour (HDR) and glyph coverage. camFade / depthFade are
+// parameters so the rain can also run on its own (camFade 0 = pure rain, depthFade 0 = flat).
+static float3 matrixCodeColor(float2 uv, float camFade, float depthFade, constant Uniforms& u,
+                              texture2d<float> lum, texture2d<float> atlas, texture2d<float> geo,
+                              sampler s, sampler glyphSampler, thread float& coverage)
 {
     float2 res = float2(u.resX, u.resY);
-    float2 px = in.uv * res;
-    float2 cd = dispUV(in.uv, u);
+    float2 px = uv * res;
+    float2 cd = dispUV(uv, u);
     float2 ct = texUV(cd, u);
 
     // Scene brightness and edges (screen space, roughly one glyph cell wide).
@@ -332,18 +328,18 @@ fragment float4 codeFS(VOut in [[stage_in]],
     float2 cs = float2(u.cellH * u.cellAspect, u.cellH);
     float lod = max(log2(u.cellH * u.lumH / u.resY) - 0.5, 0.0);
     float2 o = cs / res;
-    float L  = lum.sample(s, in.uv, level(lod)).r;
-    float lx = lum.sample(s, in.uv + float2(o.x, 0.0), level(lod)).r - lum.sample(s, in.uv - float2(o.x, 0.0), level(lod)).r;
-    float ly = lum.sample(s, in.uv + float2(0.0, o.y), level(lod)).r - lum.sample(s, in.uv - float2(0.0, o.y), level(lod)).r;
+    float L  = lum.sample(s, uv, level(lod)).r;
+    float lx = lum.sample(s, uv + float2(o.x, 0.0), level(lod)).r - lum.sample(s, uv - float2(o.x, 0.0), level(lod)).r;
+    float ly = lum.sample(s, uv + float2(0.0, o.y), level(lod)).r - lum.sample(s, uv - float2(0.0, o.y), level(lod)).r;
     float gain = clamp(0.40 / max(mean, 0.02), 0.7, 5.0) * u.exposure;
 
     // Geometry at this pixel.
     float4 gd = geo.sample(s, ct);
     float3 n = float3(gd.y, gd.z, -sqrt(saturate(1.0 - dot(gd.yz, gd.yz))));
     if (u.mirror > 0.5) n.x = -n.x;
-    float z = mix(u.zRef, max(gd.x, 0.05), u.depthFade);
-    n = normalize(mix(float3(0.0, 0.0, -1.0), n, u.depthFade));
-    float depthEdge = gd.w * u.depthFade;
+    float z = mix(u.zRef, max(gd.x, 0.05), depthFade);
+    n = normalize(mix(float3(0.0, 0.0, -1.0), n, depthFade));
+    float depthEdge = gd.w * depthFade;
 
     float3 P = rayAt(cd, u) * z;
     // Partial perspective: far surfaces get smaller glyphs, but not so small they turn to noise.
@@ -375,18 +371,18 @@ fragment float4 codeFS(VOut in [[stage_in]],
     wt /= (wt.x + wt.y + wt.z);
 
     Surface sf;
-    sf.Ln = shapeLum(L, mean, u) * u.camFade;
-    sf.lumEdge = saturate(length(float2(lx, ly)) * gain * 2.2) * u.camFade;
+    sf.Ln = shapeLum(L, mean, u) * camFade;
+    sf.lumEdge = saturate(length(float2(lx, ly)) * gain * 2.2) * camFade;
     float3 keyLight = normalize(float3(-0.45, -0.65, -0.6));
     sf.shade = 0.35 + 0.9 * saturate(dot(n, keyLight));
     float facing = saturate(-dot(n, normalize(P)));
-    float nearness = saturate((u.zRef * 2.2 - z) / (u.zRef * 1.5)) * u.depthFade;
+    float nearness = saturate((u.zRef * 2.2 - z) / (u.zRef * 1.5)) * depthFade;
     float rim = pow(1.0 - facing, 3.0) * nearness;
-    sf.outline = (depthEdge * 1.3 + rim * 0.9) * (0.35 + 0.65 * saturate(sf.Ln * 1.5)) * u.camFade;
+    sf.outline = (depthEdge * 1.3 + rim * 0.9) * (0.35 + 0.65 * saturate(sf.Ln * 1.5)) * camFade;
     sf.nearBoost = 1.0 + 0.7 * nearness;
-    sf.presence = 0.45 * nearness * u.camFade;
+    sf.presence = 0.45 * nearness * camFade;
     sf.fog = exp(-max(z - u.zRef, 0.0) * u.fogK);
-    sf.blur = 0.8 * smoothstep(u.zRef * 1.8, u.zFar * 0.8, z) * u.depthFade;
+    sf.blur = 0.8 * smoothstep(u.zRef * 1.8, u.zFar * 0.8, z) * depthFade;
 
     float v = 0.0, w = 0.0, m = 0.0;
     if (wt.z > 0.01) {
@@ -401,13 +397,31 @@ fragment float4 codeFS(VOut in [[stage_in]],
         Code c = codeAt(gT, gTdx, gTdy, 2.0, 1.4, sf, u, atlas, s, glyphSampler);
         v += c.v * wt.y; w += c.w * wt.y; m += c.m * wt.y;
     }
-    float3 matrixCol = colorize(v, w, u);
+    coverage = m;
+    return colorize(v, w, u);
+}
+
+fragment float4 codeFS(VOut in [[stage_in]],
+                       texture2d<float> lum [[texture(0)]],
+                       texture2d<float> atlas [[texture(1)]],
+                       texture2d<float> cam [[texture(2)]],
+                       texture2d<float> geo [[texture(3)]],
+                       texture2d<float> space [[texture(4)]],
+                       texture2d<float> mask [[texture(5)]],
+                       constant Uniforms& u [[buffer(0)]],
+                       sampler s [[sampler(0)]],
+                       sampler glyphSampler [[sampler(1)]])
+{
+    float m;
+    float3 matrixCol = matrixCodeColor(in.uv, u.camFade, u.depthFade, u, lum, atlas, geo, s, glyphSampler, m);
+    float2 ct = texUV(dispUV(in.uv, u), u);
     if (u.spaceOn > 0.5) {
         // Stars take on a hint of the theme color so the two layers belong together.
         float3 tint = mix(float3(1.0), float3(u.baseR, u.baseG, u.baseB), 0.45);
         matrixCol = mix(space.sample(s, in.uv).rgb * tint, matrixCol, subjectFG(mask, ct, u, s));
     }
-
+    float2 px = in.uv * float2(u.resX, u.resY);
+    float2 cs = float2(u.cellH * u.cellAspect, u.cellH);
     float2 rv = reveal(floor(px / cs), u.resY / u.cellH, u);
     float3 raw = cam.sample(s, ct).rgb * u.camFade;
     float3 outc = mix(raw, matrixCol, rv.x);

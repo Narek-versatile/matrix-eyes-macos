@@ -22,9 +22,9 @@ final class PhotoSaver {
         set { UserDefaults.standard.set(newValue?.path, forKey: Self.key) }
     }
 
-    /// Folder shown in the settings menu.
+    /// Folder shown in the settings.
     var displayPath: String {
-        folder.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "Not chosen yet (asked on the first photo)"
+        folder.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "Asked on your first photo"
     }
 
     /// Asks where photos should be saved and remembers the answer. Calls back with nil if cancelled.

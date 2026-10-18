@@ -71,6 +71,6 @@ else
 fi
 if [ -z "${MATRIX_EYES_NO_OPEN:-}" ]; then
     echo "→ Opening. Allow camera access when macOS asks."
-    echo "  1-8 change the look, G space, B black hole, Esc settings."
+    echo "  1-8 and C change the look, G space, B black hole (drag it, O to orbit you), H shortcuts, Esc settings."
     open "$dest/$APP"
 fi

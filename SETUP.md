@@ -21,18 +21,18 @@ It downloads the latest release (about 45 MB), checks its SHA-256, installs **Ma
 1. macOS asks whether Matrix Eyes may use the camera. Click **Allow**.
 2. The app opens full screen. Digital rain falls first, then your room forms out of the code in 3D.
 3. Press **Esc** for settings (the camera stops while the menu is open), **H** for the full list of keyboard shortcuts, **⌘Q** to quit.
-4. Press **1–8** to change look (Matrix, Amber, Silver Surfer, Quartz, Copper, Bronze, Doodle, 3D Print). **G** puts you in space, **B** adds a black hole, **S** takes a photo (the first time, it asks which folder to keep photos in) and **T** sets a 3, 5 or 10 second countdown first.
+4. Press **1–8** to change look (Matrix, Amber, Silver Surfer, Quartz, Copper, Bronze, Doodle, 3D Print) and **C** for the rest (corridor, Escher stairs, aurora, ...). **G** puts you in space, **B** adds a black hole: drag it around with the mouse, or press **O** and it orbits your head. **S** takes a photo (the first time, it asks which folder to keep photos in) and **T** sets a 3, 5 or 10 second countdown first.
 
 After that, open it like any other app: Launchpad, Spotlight ("Matrix Eyes") or the Applications folder.
 
 ## Update
 
-Run the same command again. It replaces the installed app with the latest release; your settings are kept.
+Run the same command again. It replaces the installed app with the latest release; your settings are kept. (Updating from version 1 to 2: your look and settings carry over the first time you open it.)
 
 ## Uninstall
 
 ```bash
-rm -rf "/Applications/Matrix Eyes.app" ~/Applications/"Matrix Eyes.app"; defaults delete io.github.narek-versatile.matrix-eyes 2>/dev/null; true
+rm -rf "/Applications/Matrix Eyes.app" ~/Applications/"Matrix Eyes.app" ~/Library/Application\ Support/"Matrix Eyes"; defaults delete io.github.narek-versatile.matrix-eyes 2>/dev/null; true
 ```
 
 ## Troubleshooting
@@ -48,6 +48,8 @@ xattr -dr com.apple.quarantine "/Applications/Matrix Eyes.app"
 **"Matrix Eyes needs an Apple silicon Mac."** Intel Macs aren't supported.
 
 **It looks too dark or too bright.** Press **Esc** and adjust Brightness, or use ↑ / ↓.
+
+**I changed a built-in look and want it back.** Press **Esc**, pick it under Look and click **Reset**.
 
 ## Build from source instead
 

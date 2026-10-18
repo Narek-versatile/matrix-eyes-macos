@@ -140,8 +140,8 @@ static float3 blackHoleRay(float3 C, float3 rd, float time, float pxAng, thread 
     return emit;
 }
 
-fragment float4 spaceFS(VOut in [[stage_in]],
-                        constant Uniforms& u [[buffer(0)]])
+// Space as seen through the screen. `head` (about -1..1) moves the virtual camera for parallax.
+static float3 spaceAt(float2 uv, float2 head, constant Uniforms& u)
 {
     float aspect = u.resX / u.resY;
     float tanV = u.bhTanV;
@@ -149,14 +149,16 @@ fragment float4 spaceFS(VOut in [[stage_in]],
     float t = u.time;
 
     // The camera looks at the black hole from slightly above its disk; the hole sits at (bhX, bhY).
-    float2 bh = float2(u.bhX + 0.012 * sin(t * 0.07), u.bhY + 0.008 * sin(t * 0.05 + 1.0));
-    float2 offs = float2((in.uv.x - bh.x) * aspect, bh.y - in.uv.y) * 2.0 * tanV;
+    float2 bh = float2(u.bhX, u.bhY);
+    float2 offs = float2((uv.x - bh.x) * aspect, bh.y - uv.y) * 2.0 * tanV;
     float elev = u.bhElev + 0.025 * sin(t * 0.11);
-    const float D = 25.0;
+    float D = u.bhDist;
     float3 C = D * float3(0.0, sin(elev), -cos(elev));
     float3 f = normalize(-C);
     float3 right = normalize(cross(float3(0.0, 1.0, 0.0), f));
     float3 up = cross(f, right);
+    // Moving the camera (not its aim) with your head: the hole shifts against the far stars.
+    C += (right * head.x + up * head.y) * 2.2;
     float3 rd = normalize(f + offs.x * right + offs.y * up);
 
     float3 dir = rd, emit = float3(0.0);
@@ -187,5 +189,11 @@ fragment float4 spaceFS(VOut in [[stage_in]],
     float ca = cos(a), sa = sin(a);
     float3 skyDir = float3(ca * dir.x + sa * dir.z, dir.y, -sa * dir.x + ca * dir.z);
     float3 col = starfield(skyDir, t, pxAng) * sky + emit;
-    return float4(col, 1.0);
+    return col;
+}
+
+fragment float4 spaceFS(VOut in [[stage_in]],
+                        constant Uniforms& u [[buffer(0)]])
+{
+    return float4(spaceAt(in.uv, float2(0.0), u), 1.0);
 }

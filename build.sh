@@ -7,12 +7,13 @@ APP="Matrix Eyes.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
+# Sources/Engine and Resources/Shaders are shared with Matrix Eyes Cam (copied from there).
 swiftc -O -swift-version 5 -target arm64-apple-macos14.0 \
-    Sources/*.swift \
+    Sources/Engine/*.swift Sources/App/*.swift \
     -o "$APP/Contents/MacOS/MatrixEyes"
 
 cp Info.plist "$APP/Contents/Info.plist"
-cp Resources/*.metal "$APP/Contents/Resources/"
+cp Resources/Shaders/*.msl "$APP/Contents/Resources/"
 cp THIRD_PARTY_NOTICES.md LICENSE "$APP/Contents/Resources/"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 

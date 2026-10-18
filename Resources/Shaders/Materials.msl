@@ -251,25 +251,20 @@ static float3 shadeDoodle(float2 uv, Surf sf, float tone, texture2d<float> geo, 
 
 // ---------------------------------------------------------------------------
 
-fragment float4 materialFS(VOut in [[stage_in]],
-                           texture2d<float> lum [[texture(0)]],
-                           texture2d<float> cam [[texture(2)]],
-                           texture2d<float> geo [[texture(3)]],
-                           texture2d<float> space [[texture(4)]],
-                           texture2d<float> mask [[texture(5)]],
-                           constant Uniforms& u [[buffer(0)]],
-                           sampler s [[sampler(0)]])
+// A material look at a screen position, as scene-linear colour (before tone mapping).
+static float3 materialColor(float2 uv, float styleID, constant Uniforms& u,
+                            texture2d<float> lum, texture2d<float> geo, sampler s)
 {
     float2 res = float2(u.resX, u.resY);
-    float2 px = in.uv * res;
-    float2 cd = dispUV(in.uv, u);
+    float2 px = uv * res;
+    float2 cd = dispUV(uv, u);
     float2 ct = texUV(cd, u);
 
     // --- geometry
     float4 gd = geo.sample(s, ct);
     float3 ng = float3(gd.y, gd.z, -sqrt(saturate(1.0 - dot(gd.yz, gd.yz))));
     if (u.mirror > 0.5) ng.x = -ng.x;
-    ng.xy *= (u.style == 2.0 ? 1.8 : 1.5);              // exaggerate relief a little: depth maps are shallow
+    ng.xy *= (styleID == 2.0 ? 1.8 : 1.5);              // exaggerate relief a little: depth maps are shallow
     float z = mix(u.zRef, max(gd.x, 0.05), u.depthFade);
     ng = normalize(mix(float3(0.0, 0.0, -1.0), normalize(ng), u.depthFade));
     float3 P = rayAt(cd, u) * z;
@@ -278,10 +273,10 @@ fragment float4 materialFS(VOut in [[stage_in]],
     float mean = lum.sample(s, float2(0.5), level(14.0)).r;
     float gain = clamp(0.40 / max(mean, 0.02), 0.7, 5.0) * u.exposure;
     float2 o = 5.0 * max(u.resY / 1200.0, 1.0) / res;
-    float L = lum.sample(s, in.uv, level(1.0)).r;
-    float gx = lum.sample(s, in.uv + float2(o.x, 0.0), level(1.0)).r - lum.sample(s, in.uv - float2(o.x, 0.0), level(1.0)).r;
-    float gy = lum.sample(s, in.uv + float2(0.0, o.y), level(1.0)).r - lum.sample(s, in.uv - float2(0.0, o.y), level(1.0)).r;
-    float bump = (u.style == 1.0 ? 1.1 : (u.style == 2.0 ? 0.4 : 0.8)) * gain;
+    float L = lum.sample(s, uv, level(1.0)).r;
+    float gx = lum.sample(s, uv + float2(o.x, 0.0), level(1.0)).r - lum.sample(s, uv - float2(o.x, 0.0), level(1.0)).r;
+    float gy = lum.sample(s, uv + float2(0.0, o.y), level(1.0)).r - lum.sample(s, uv - float2(0.0, o.y), level(1.0)).r;
+    float bump = (styleID == 1.0 ? 1.1 : (styleID == 2.0 ? 0.4 : 0.8)) * gain;
     float3 n = normalize(ng + float3(-gx * bump * 2.2, -gy * bump * 2.2, 0.0));
 
     // --- crevices: compare this depth with the surroundings
@@ -306,21 +301,35 @@ fragment float4 materialFS(VOut in [[stage_in]],
     sf.pitch = fwidth(P.y / 0.0021);
 
     float3 col;
-    if (u.style < 1.5) col = shadeChrome(sf, u);
-    else if (u.style < 2.5) col = shadeQuartz(sf, u);
-    else if (u.style < 3.5) col = shadeCopper(sf, u);
-    else if (u.style < 4.5) col = shadeBronze(sf, u);
-    else if (u.style < 5.5) {
+    if (styleID < 1.5) col = shadeChrome(sf, u);
+    else if (styleID < 2.5) col = shadeQuartz(sf, u);
+    else if (styleID < 3.5) col = shadeCopper(sf, u);
+    else if (styleID < 4.5) col = shadeBronze(sf, u);
+    else if (styleID < 5.5) {
         float tone = 0.5 + 0.5 * dot(n, keyLight(u.time));
         tone = mix(tone, saturate(sf.L), 0.45) * (0.65 + 0.35 * sf.ao);
-        col = shadeDoodle(in.uv, sf, tone, geo, lum, u, s, ct);
+        col = shadeDoodle(uv, sf, tone, geo, lum, u, s, ct);
     }
     else col = shadePlastic(sf, u);
 
     // silhouettes get a soft bright edge on the metals so figures separate from their background
-    if (u.style < 1.5) col += float3(0.5, 0.7, 1.0) * sf.depthEdge * 0.22;
+    if (styleID < 1.5) col += float3(0.5, 0.7, 1.0) * sf.depthEdge * 0.22;
 
-    // --- compose with the background and the camera fade-in
+    return col;
+}
+
+fragment float4 materialFS(VOut in [[stage_in]],
+                           texture2d<float> lum [[texture(0)]],
+                           texture2d<float> cam [[texture(2)]],
+                           texture2d<float> geo [[texture(3)]],
+                           texture2d<float> space [[texture(4)]],
+                           texture2d<float> mask [[texture(5)]],
+                           constant Uniforms& u [[buffer(0)]],
+                           sampler s [[sampler(0)]])
+{
+    float3 col = materialColor(in.uv, u.style, u, lum, geo, s);
+    float2 px = in.uv * float2(u.resX, u.resY);
+    float2 ct = texUV(dispUV(in.uv, u), u);
     float3 bg = u.spaceOn > 0.5 ? space.sample(s, in.uv).rgb : float3(0.0);
     float fg = subjectFG(mask, ct, u, s);
     float3 styled = mix(bg, col, fg * u.camFade);

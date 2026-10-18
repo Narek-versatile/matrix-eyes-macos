@@ -17,10 +17,9 @@ enum Shortcuts {
             Item(keys: ["1", "…", "8"], text: "Pick a look"),
             Item(keys: ["C"], text: "Next look"),
             Item(keys: ["Space"], text: "Leave / enter the look"),
-        ], note: "1 Matrix  2 Amber  3 Silver Surfer  4 Quartz\n5 Copper  6 Bronze  7 Doodle  8 3D Print"),
+        ], note: "1 Matrix  2 Amber  3 Silver Surfer  4 Quartz\n5 Copper  6 Bronze  7 Doodle  8 3D Print\nC also visits the scenes (corridor, aurora, …). Esc to fine-tune any look."),
         Section(title: "SCENE", items: [
             Item(keys: ["G"], text: "Space background on / off"),
-            Item(keys: ["B"], text: "Black hole on / off"),
             Item(keys: ["D"], text: "3D depth on / off"),
             Item(keys: ["M"], text: "Mirror on / off"),
         ]),
@@ -32,13 +31,17 @@ enum Shortcuts {
     ]
 
     static let right: [Section] = [
+        Section(title: "BLACK HOLE", items: [
+            Item(keys: ["B"], text: "Black hole on / off"),
+            Item(keys: ["Drag"], text: "Move it with the mouse"),
+            Item(keys: ["O"], text: "Let it orbit your head"),
+        ], note: "It bends you, pulls you in and lights you: set how much in settings."),
         Section(title: "PHOTOS", items: [
             Item(keys: ["S"], text: "Take a photo (again to cancel)"),
             Item(keys: ["T"], text: "Timer: off / 3 / 5 / 10 seconds"),
         ], note: "The first photo asks where to save. Change it in settings."),
         Section(title: "APP", items: [
             Item(keys: ["Esc"], text: "Settings (the camera pauses)"),
-            Item(keys: ["⌘", ","], text: "Settings"),
             Item(keys: ["H"], text: "This page"),
             Item(keys: ["F"], text: "Full screen on / off"),
             Item(keys: ["⌘", "Q"], text: "Quit"),
