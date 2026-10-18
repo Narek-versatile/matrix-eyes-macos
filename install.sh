@@ -17,7 +17,9 @@ fail() { echo "✗ $*" >&2; exit 1; }
 major=$(sw_vers -productVersion | cut -d. -f1)
 [ "$major" -ge 14 ] || fail "Matrix Eyes needs macOS 14 Sonoma or newer (this Mac has $(sw_vers -productVersion))."
 
+custom_dest=""
 if [ -n "${MATRIX_EYES_DEST:-}" ]; then
+    custom_dest=1
     dest="$MATRIX_EYES_DEST"
 elif [ -w /Applications ]; then
     dest="/Applications"
@@ -41,13 +43,34 @@ actual=$(shasum -a 256 "$tmp/Matrix-Eyes.zip" | awk '{print $1}')
 echo "→ Installing to ${dest}…"
 ditto -x -k "$tmp/Matrix-Eyes.zip" "$tmp/unpacked"
 [ -d "$tmp/unpacked/$APP" ] || fail "The download didn't contain $APP."
+
+version_of() { plutil -extract CFBundleShortVersionString raw "$1/Contents/Info.plist" 2>/dev/null || true; }
+old_version=$(version_of "$dest/$APP")
+new_version=$(version_of "$tmp/unpacked/$APP")
+
 pkill -f "$APP/Contents/MacOS/MatrixEyes" 2>/dev/null && sleep 1 || true
-rm -rf "$dest/$APP"
+rm -rf "${dest:?}/$APP"
 mv "$tmp/unpacked/$APP" "$dest/"
 xattr -dr com.apple.quarantine "$dest/$APP" 2>/dev/null || true
 
-echo "✓ Installed $dest/$APP"
+# An older copy left in the other Applications folder would shadow the new one in Spotlight and Launchpad.
+if [ -z "$custom_dest" ]; then
+    for other in /Applications "$HOME/Applications"; do
+        if [ "$other" != "$dest" ] && [ -d "$other/$APP" ]; then
+            rm -rf "${other:?}/$APP" 2>/dev/null && echo "  (removed the older copy in $other)" || true
+        fi
+    done
+fi
+
+if [ -n "$old_version" ] && [ "$old_version" != "$new_version" ]; then
+    echo "✓ Updated Matrix Eyes $old_version → $new_version in $dest"
+elif [ -n "$old_version" ]; then
+    echo "✓ Reinstalled Matrix Eyes $new_version in $dest"
+else
+    echo "✓ Installed Matrix Eyes $new_version in $dest"
+fi
 if [ -z "${MATRIX_EYES_NO_OPEN:-}" ]; then
-    echo "→ Opening. Allow camera access when macOS asks; press Esc for settings."
+    echo "→ Opening. Allow camera access when macOS asks."
+    echo "  1-8 change the look, G space, B black hole, Esc settings."
     open "$dest/$APP"
 fi

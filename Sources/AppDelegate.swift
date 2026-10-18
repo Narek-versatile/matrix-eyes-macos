@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var renderer: Renderer!
     private let camera = Camera()
     private var depth: DepthEstimator?
+    private var masker: PersonMasker?
     private let help = Pill(fontSize: 13)
     private let toast = Pill(fontSize: 14)
     private var toastHide: DispatchWorkItem?
@@ -56,8 +57,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     MATRIX EYES
 
     ESC     settings (pauses the camera)
-    SPACE   leave / enter the Matrix
-    C       green / amber
+    1-8     pick a look (or C to cycle)
+            1 Matrix  2 Amber  3 Silver Surfer
+            4 Quartz  5 Copper  6 Bronze
+            7 Doodle  8 3D Print
+    G       space background on / off
+    B       black hole on / off
+    SPACE   leave / enter the look
     + / -   bigger / smaller glyphs
     ↑ / ↓   brighter / darker
     ← / →   slower / faster rain
@@ -145,8 +151,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Depth runs on the Neural Engine; if the model is missing the app still works, just flat.
         if let estimator = try? DepthEstimator(device: device) {
             depth = estimator
-            camera.onPixelBuffer = { estimator.submit($0) }
             renderer.depthFrame = { estimator.latestTexture() }
+        }
+        // The person cut-out only runs while a space background is on.
+        let personMasker = PersonMasker(device: device)
+        masker = personMasker
+        renderer.maskFrame = { personMasker.latestTexture() }
+        camera.onPixelBuffer = { [weak self] buffer in
+            self?.depth?.submit(buffer)
+            if self?.renderer.spaceEnabled == true { self?.masker?.submit(buffer) }
         }
         camera.onProblem = { [weak self] message in
             self?.cameraProblem = true
@@ -155,9 +168,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         camera.start(device: device)
 
         let prefs = Preferences.load()
-        prefs.apply(to: renderer)
+        prefs.apply(to: renderer, animated: false)
         if depth == nil { renderer.depthEnabled = false }
-        tint(prefs.theme)
+        tint(prefs.style)
 
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
@@ -165,6 +178,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.async { self.window.toggleFullScreen(nil) }
         scheduleHelpHide(after: 7)
         NSCursor.setHiddenUntilMouseMoves(true)
+        if ProcessInfo.processInfo.environment["MATRIX_SELFTEST"] != nil { runSelfTest() }
+    }
+
+    /// Developer check (MATRIX_SELFTEST=1): drives the real app through every look, space, the black
+    /// hole and the settings menu (which pauses and resumes the camera), then quits.
+    private func runSelfTest() {
+        var t = 3.0   // let the camera come up first
+        func at(_ delay: Double, _ work: @escaping () -> Void) {
+            t += delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: work)
+        }
+        for style in Style.allCases { at(1.0) { [weak self] in self?.choose(style) } }
+        at(1.0) { [weak self] in self?.choose(.chrome) }
+        at(1.5) { [weak self] in self?.renderer.blackHoleEnabled.toggle() }
+        at(1.0) { [weak self] in self?.renderer.blackHoleEnabled.toggle() }
+        at(1.0) { [weak self] in self?.setSettingsOpen(true) }
+        at(1.5) { [weak self] in self?.setSettingsOpen(false) }
+        at(1.5) { [weak self] in self?.renderer.spaceEnabled = false }
+        at(1.5) { [weak self] in self?.choose(.quartz) }
+        at(1.5) {
+            FileHandle.standardError.write(Data("selftest finished\n".utf8))
+            NSApp.terminate(nil)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -209,10 +245,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case "-", "_":
             renderer.rows = min(renderer.rows + 6, Preferences.rowsRange.upperBound)
             showToast(String(format: "GLYPH SIZE %.0f%%", 72 / renderer.rows * 100))
+        case "1", "2", "3", "4", "5", "6", "7", "8":
+            if let n = Int(event.charactersIgnoringModifiers ?? ""), n >= 1, n <= Style.allCases.count {
+                choose(Style.allCases[n - 1])
+            }
         case "c":
-            renderer.theme = renderer.theme.next
-            tint(renderer.theme)
-            showToast(renderer.theme.title.uppercased())
+            choose(renderer.style.next)
+        case "g":
+            renderer.spaceEnabled.toggle()
+            showToast(renderer.spaceEnabled ? "SPACE" : "ROOM")
+        case "b":
+            if !renderer.spaceEnabled {
+                renderer.spaceEnabled = true
+                renderer.blackHoleEnabled = true
+                showToast("BLACK HOLE")
+            } else {
+                renderer.blackHoleEnabled.toggle()
+                showToast(renderer.blackHoleEnabled ? "BLACK HOLE" : "NO BLACK HOLE")
+            }
         case "d":
             guard depth != nil else {
                 showToast("3D DEPTH UNAVAILABLE")
@@ -270,13 +320,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func apply(_ prefs: Preferences) {
         prefs.apply(to: renderer)
         if depth == nil { renderer.depthEnabled = false }
-        tint(prefs.theme)
+        tint(prefs.style)
         prefs.save()
     }
 
-    private func tint(_ theme: ColorTheme) {
-        help.setTint(theme.uiColor)
-        toast.setTint(theme.uiColor)
+    /// Switches look from the keyboard. Silver Surfer comes with its space background.
+    private func choose(_ style: Style) {
+        let was = renderer.style
+        renderer.setStyle(style)
+        if style == .chrome, was != .chrome { renderer.spaceEnabled = true }
+        tint(style)
+        showToast(style.title.uppercased())
+    }
+
+    private func tint(_ style: Style) {
+        help.setTint(style.uiColor)
+        toast.setTint(style.uiColor)
     }
 
     // MARK: - Overlays

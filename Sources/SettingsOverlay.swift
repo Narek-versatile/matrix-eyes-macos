@@ -1,7 +1,7 @@
 import AppKit
 
 /// Full-window overlay holding the settings card. Opened with Esc; the app pauses the
-/// camera while it's up, and the code keeps raining over the last frame behind it.
+/// camera while it's up, and the picture keeps running behind it.
 final class SettingsOverlay: NSView {
     var onChange: ((Preferences) -> Void)?
     var onResume: (() -> Void)?
@@ -11,8 +11,9 @@ final class SettingsOverlay: NSView {
     private let card = NSView()
     private let titleLabel = NSTextField(labelWithString: "MATRIX EYES")
     private let statusLabel = NSTextField(labelWithString: "●  CAMERA PAUSED")
-    private let themeControl = NSSegmentedControl(labels: ColorTheme.allCases.map(\.title),
-                                                  trackingMode: .selectOne, target: nil, action: nil)
+    private let styleControl = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let backgroundControl = NSSegmentedControl(labels: ["Room", "Space"], trackingMode: .selectOne, target: nil, action: nil)
+    private let holeControl = NSSegmentedControl(labels: ["On", "Off"], trackingMode: .selectOne, target: nil, action: nil)
     private let sizeSlider = NSSlider()
     private let brightnessSlider = NSSlider()
     private let speedSlider = NSSlider()
@@ -25,6 +26,7 @@ final class SettingsOverlay: NSView {
     private let quitButton = NSButton(title: "Quit", target: nil, action: nil)
     private var valueLabels: [NSSlider: NSTextField] = [:]
     private var captions: [NSTextField] = []
+    private var captionFor: [NSControl: NSTextField] = [:]
 
     init() {
         super.init(frame: .zero)
@@ -39,7 +41,9 @@ final class SettingsOverlay: NSView {
     /// Loads current values into the controls.
     func show(_ p: Preferences, depthAvailable: Bool) {
         prefs = p
-        themeControl.selectedSegment = ColorTheme.allCases.firstIndex(of: p.theme) ?? 0
+        styleControl.selectItem(at: Style.allCases.firstIndex(of: p.style) ?? 0)
+        backgroundControl.selectedSegment = p.space ? 1 : 0
+        holeControl.selectedSegment = p.blackHole ? 0 : 1
         // Slider runs small -> big glyphs, i.e. many -> few rows.
         sizeSlider.floatValue = Preferences.rowsRange.upperBound + Preferences.rowsRange.lowerBound - p.rows
         brightnessSlider.floatValue = p.exposure
@@ -51,10 +55,11 @@ final class SettingsOverlay: NSView {
         mirrorControl.selectedSegment = p.mirror ? 0 : 1
         refreshValues()
         applyTint()
+        applyEnabledState()
     }
 
     func focusFirstControl() {
-        window?.makeFirstResponder(themeControl)
+        window?.makeFirstResponder(styleControl)
     }
 
     // Clicking the dimmed area outside the card closes the menu.
@@ -66,7 +71,7 @@ final class SettingsOverlay: NSView {
 
     private func buildCard() {
         card.wantsLayer = true
-        card.layer?.backgroundColor = NSColor(white: 0.02, alpha: 0.88).cgColor
+        card.layer?.backgroundColor = NSColor(white: 0.02, alpha: 0.9).cgColor
         card.layer?.cornerRadius = 16
         card.layer?.borderWidth = 1
         card.translatesAutoresizingMaskIntoConstraints = false
@@ -98,29 +103,37 @@ final class SettingsOverlay: NSView {
         glowSlider.minValue = Double(Preferences.glowRange.lowerBound)
         glowSlider.maxValue = Double(Preferences.glowRange.upperBound)
 
-        for control in [themeControl, depthControl, mirrorControl] as [NSControl] {
+        styleControl.addItems(withTitles: Style.allCases.map(\.title))
+        styleControl.font = .systemFont(ofSize: 13)
+        styleControl.widthAnchor.constraint(equalToConstant: 200).isActive = true
+
+        for control in [styleControl, backgroundControl, holeControl, depthControl, mirrorControl] as [NSControl] {
             control.target = self
             control.action = #selector(controlChanged(_:))
         }
         depthNote.font = .systemFont(ofSize: 11)
         depthNote.textColor = .secondaryLabelColor
 
-        func caption(_ text: String) -> NSTextField {
+        func caption(_ text: String, for control: NSControl) -> NSTextField {
             let label = NSTextField(labelWithString: text)
             label.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
             captions.append(label)
+            captionFor[control] = label
             return label
         }
+        let empty = { NSGridCell.emptyContentView }
         let grid = NSGridView(views: [
-            [caption("COLOR"), themeControl, NSGridCell.emptyContentView],
-            [caption("GLYPH SIZE"), sizeSlider, valueLabels[sizeSlider]!],
-            [caption("BRIGHTNESS"), brightnessSlider, valueLabels[brightnessSlider]!],
-            [caption("RAIN SPEED"), speedSlider, valueLabels[speedSlider]!],
-            [caption("GLOW"), glowSlider, valueLabels[glowSlider]!],
-            [caption("3D DEPTH"), NSStackView(views: [depthControl, depthNote]), NSGridCell.emptyContentView],
-            [caption("MIRROR"), mirrorControl, NSGridCell.emptyContentView],
+            [caption("STYLE", for: styleControl), styleControl, empty()],
+            [caption("BACKGROUND", for: backgroundControl), backgroundControl, empty()],
+            [caption("BLACK HOLE", for: holeControl), holeControl, empty()],
+            [caption("GLYPH SIZE", for: sizeSlider), sizeSlider, valueLabels[sizeSlider]!],
+            [caption("BRIGHTNESS", for: brightnessSlider), brightnessSlider, valueLabels[brightnessSlider]!],
+            [caption("RAIN SPEED", for: speedSlider), speedSlider, valueLabels[speedSlider]!],
+            [caption("GLOW", for: glowSlider), glowSlider, valueLabels[glowSlider]!],
+            [caption("3D DEPTH", for: depthControl), NSStackView(views: [depthControl, depthNote]), empty()],
+            [caption("MIRROR", for: mirrorControl), mirrorControl, empty()],
         ])
-        grid.rowSpacing = 16
+        grid.rowSpacing = 15
         grid.columnSpacing = 18
         grid.column(at: 0).xPlacement = .leading
         grid.column(at: 2).xPlacement = .trailing
@@ -139,8 +152,8 @@ final class SettingsOverlay: NSView {
         let content = NSStackView(views: [header, grid, footer])
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 26
-        content.setCustomSpacing(30, after: grid)
+        content.spacing = 24
+        content.setCustomSpacing(28, after: grid)
         content.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(content)
 
@@ -159,15 +172,24 @@ final class SettingsOverlay: NSView {
     // MARK: - Actions
 
     @objc private func controlChanged(_ sender: NSControl) {
-        prefs.theme = ColorTheme.allCases[max(themeControl.selectedSegment, 0)]
+        let previousStyle = prefs.style
+        prefs.style = Style.allCases[max(styleControl.indexOfSelectedItem, 0)]
+        prefs.space = backgroundControl.selectedSegment == 1
+        prefs.blackHole = holeControl.selectedSegment == 0
         prefs.rows = Preferences.rowsRange.upperBound + Preferences.rowsRange.lowerBound - sizeSlider.floatValue
         prefs.exposure = brightnessSlider.floatValue
         prefs.speed = speedSlider.floatValue
         prefs.glow = glowSlider.floatValue
         if depthControl.isEnabled { prefs.depth3D = depthControl.selectedSegment == 0 }
         prefs.mirror = mirrorControl.selectedSegment == 0
+        // Silver Surfer belongs in space: switching to it brings the background along.
+        if sender === styleControl, prefs.style == .chrome, previousStyle != .chrome {
+            prefs.space = true
+            backgroundControl.selectedSegment = 1
+        }
         refreshValues()
-        if sender === themeControl { applyTint() }
+        applyTint()
+        applyEnabledState()
         onChange?(prefs)
     }
 
@@ -181,16 +203,29 @@ final class SettingsOverlay: NSView {
         valueLabels[glowSlider]?.stringValue = String(format: "%.0f%%", prefs.glow * 100)
     }
 
-    /// Recolors text and controls in the current theme's accent.
+    /// Greys out settings that don't apply to the current look.
+    private func applyEnabledState() {
+        let matrix = prefs.style.isMatrix
+        for control in [sizeSlider, speedSlider] as [NSControl] {
+            control.isEnabled = matrix
+            captionFor[control]?.alphaValue = matrix ? 1 : 0.3
+        }
+        valueLabels[sizeSlider]?.alphaValue = matrix ? 1 : 0.3
+        valueLabels[speedSlider]?.alphaValue = matrix ? 1 : 0.3
+        holeControl.isEnabled = prefs.space
+        captionFor[holeControl]?.alphaValue = prefs.space ? 1 : 0.3
+    }
+
+    /// Recolors text and controls in the current style's accent.
     private func applyTint() {
-        let accent = prefs.theme.uiColor
+        let accent = prefs.style.uiColor
         card.layer?.borderColor = accent.withAlphaComponent(0.35).cgColor
         titleLabel.textColor = accent
         statusLabel.textColor = accent.withAlphaComponent(0.7)
         for label in captions { label.textColor = accent.withAlphaComponent(0.85) }
         for label in valueLabels.values { label.textColor = accent.withAlphaComponent(0.85) }
         for slider in [sizeSlider, brightnessSlider, speedSlider, glowSlider] { slider.trackFillColor = accent }
-        for control in [themeControl, depthControl, mirrorControl] {
+        for control in [backgroundControl, holeControl, depthControl, mirrorControl] {
             control.selectedSegmentBezelColor = accent.withAlphaComponent(0.55)
         }
         resumeButton.bezelColor = accent.withAlphaComponent(0.6)

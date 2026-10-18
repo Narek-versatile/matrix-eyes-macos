@@ -23,8 +23,25 @@ func runRenderTest(_ args: [String]) -> Int32 {
         renderer.cameraFrame = { (image, nil) }
         renderer.cameraStartTime = -100
         renderer.mirror = false
-        if let theme = ProcessInfo.processInfo.environment["MATRIX_THEME"].flatMap(ColorTheme.init(rawValue:)) {
-            renderer.theme = theme
+        let env = ProcessInfo.processInfo.environment
+        if let style = (env["MATRIX_STYLE"] ?? env["MATRIX_THEME"]).flatMap(Style.init(rawValue:)) {
+            renderer.setStyle(style, animated: false)
+        }
+        if let g = env["MATRIX_GLOW"].flatMap(Float.init) { renderer.glow = g }
+        if let e = env["MATRIX_EXPOSURE"].flatMap(Float.init) { renderer.exposure = e }
+        renderer.spaceEnabled = env["MATRIX_SPACE"] == "1"
+        renderer.blackHoleEnabled = env["MATRIX_BH"] != "0"
+        if renderer.spaceEnabled, let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[0]) as CFURL, nil),
+           let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            let masker = PersonMasker(device: device)
+            _ = masker.estimate(cgImage)
+            if let maskTex = masker.estimate(cgImage) {
+                print(String(format: "person mask: %dx%d in %.1f ms", maskTex.width, maskTex.height, masker.lastInferenceMs))
+                renderer.maskFrame = { maskTex }
+                if let out = env["MATRIX_MASK_OUT"] { saveMaskPreview(maskTex, to: out) }
+            } else {
+                print("person mask: none found")
+            }
         }
 
         if ProcessInfo.processInfo.environment["MATRIX_FLAT"] == nil,
@@ -56,6 +73,21 @@ func runRenderTest(_ args: [String]) -> Int32 {
         gpuTimes.sort()
         print(String(format: "GPU per frame at %dx%d: median %.2f ms, worst %.2f ms",
                      width, height, gpuTimes[gpuTimes.count / 2] * 1000, gpuTimes.last! * 1000))
+
+        if env["MATRIX_DUMP_GEO"] != nil, let g = renderer.debugReadGeometry() {
+            var bad: [(Int, Int)] = []
+            for y in 0..<g.h { for x in 0..<g.w {
+                let i = (y * g.w + x) * 4
+                if !g.data[i + 1].isFinite || !g.data[i + 2].isFinite { bad.append((x, y)) }
+            } }
+            if let xs = bad.map(\.0).min(), let xe = bad.map(\.0).max(), let ys = bad.map(\.1).min(), let ye = bad.map(\.1).max() {
+                print("geo NaN texels: \(bad.count) in x \(xs)...\(xe), y \(ys)...\(ye) of \(g.w)x\(g.h)")
+                let i = (ys * g.w + xs) * 4
+                print("sample at corner:", g.data[i], g.data[i + 1], g.data[i + 2], g.data[i + 3])
+                let j = ((ys + 5) * g.w + xs + 5) * 4
+                print("inside:", g.data[j], g.data[j + 1], g.data[j + 2], g.data[j + 3])
+            } else { print("geo: no NaN") }
+        }
 
         if let atlasOut = ProcessInfo.processInfo.environment["MATRIX_ATLAS_OUT"], let atlasImage = renderer.atlasImage,
            let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: atlasOut) as CFURL, UTType.png.identifier as CFString, 1, nil) {
@@ -93,13 +125,28 @@ func saveDepthPreview(_ tex: MTLTexture, to path: String) {
     CGImageDestinationFinalize(dest)
 }
 
+/// Writes the person cut-out as a grayscale PNG.
+func saveMaskPreview(_ tex: MTLTexture, to path: String) {
+    let w = tex.width, h = tex.height
+    var bytes = [UInt8](repeating: 0, count: w * h)
+    tex.getBytes(&bytes, bytesPerRow: w, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+    print(String(format: "mask coverage: %.1f%%", Double(bytes.filter { $0 > 127 }.count) / Double(w * h) * 100))
+    guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                              space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
+          let img = ctx.makeImage(),
+          let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil)
+    else { return }
+    CGImageDestinationAddImage(dest, img, nil)
+    CGImageDestinationFinalize(dest)
+}
+
 /// Draws the settings menu offscreen into a PNG, to check its layout without opening a window.
 ///   MatrixEyes --settings-preview <output.png> [green|amber]
 func runSettingsPreview(_ args: [String]) -> Int32 {
     guard let out = args.first else { return 2 }
     _ = NSApplication.shared
     var prefs = Preferences()
-    if args.count > 1, let theme = ColorTheme(rawValue: args[1]) { prefs.theme = theme }
+    if args.count > 1, let style = Style(rawValue: args[1]) { prefs.style = style }
     let overlay = SettingsOverlay()
     overlay.frame = NSRect(x: 0, y: 0, width: 1000, height: 640)
     overlay.show(prefs, depthAvailable: true)

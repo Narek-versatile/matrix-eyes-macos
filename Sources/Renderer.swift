@@ -41,6 +41,23 @@ struct Uniforms {
     // color theme
     var baseR: Float = 0.40, baseG: Float = 1.0, baseB: Float = 0.46
     var hotR: Float = 0.92, hotG: Float = 1.0, hotB: Float = 0.94
+    // style / space
+    var style: Float = 0
+    var spaceOn: Float = 0
+    var bhOn: Float = 0
+    var maskOn: Float = 0
+    var bhX: Float = 0.73, bhY: Float = 0.27
+    var bhTanV: Float = 0.69
+    var bhElev: Float = 0.13
+    var matrixLook: Float = 1
+}
+
+/// Mirrors `CompositeParams` in Shaders.metal.
+struct CompositeParams {
+    var glow: Float = 1
+    var bloomK: Float = 1
+    var toneMode: Float = 0
+    var fade: Float = 1
 }
 
 enum RendererError: Error, CustomStringConvertible {
@@ -49,7 +66,7 @@ enum RendererError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .shaderSourceMissing: return "Shaders.metal was not found in the app bundle."
+        case .shaderSourceMissing: return "The shader sources (Resources/*.metal) were not found in the app bundle."
         case .missingFunction(let name): return "Shader function \(name) is missing."
         }
     }
@@ -66,11 +83,25 @@ final class Renderer: NSObject, MTKViewDelegate {
     var mirror = true
     var depthEnabled = true
     var glow: Float = 1
-    var theme: ColorTheme = .green
+    /// Outer space instead of the room, with you cut out in front of it.
+    var spaceEnabled = false
+    var blackHoleEnabled = true
     private(set) var matrixOn = true
-    // Displayed theme colors, eased toward `theme` so switching cross-fades.
-    private var baseColor = ColorTheme.green.base
-    private var hotColor = ColorTheme.green.hot
+
+    /// The look being shown (or fading toward). Changing it dips the picture to black for a beat.
+    private(set) var style: Style = .green
+    private var shownStyle: Style = .green
+    private var fadeOut: Double = 0        // seconds spent fading out the old look
+    private var fadeIn: Double = 1         // seconds spent fading in the new one
+
+    func setStyle(_ new: Style, animated: Bool = true) {
+        style = new
+        if !animated {
+            shownStyle = new
+            fadeOut = 0
+            fadeIn = 1
+        }
+    }
 
     /// Supplies the newest camera frame plus an object to keep alive until the GPU is done with it.
     var cameraFrame: (() -> (MTLTexture, AnyObject?)?)?
@@ -78,11 +109,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     var cameraStartTime: Double?
     /// Supplies the newest depth map (relative inverse depth, camera-aligned), if depth estimation is running.
     var depthFrame: (() -> MTLTexture?)?
+    /// Supplies the newest person cut-out (r8, 1 = person), if it's running.
+    var maskFrame: (() -> MTLTexture?)?
     /// 0 = flat, 1 = full 3D; eased toward its target so switching depth on/off morphs smoothly.
     var depthProgress: Double = 0
     private var lastFrameTime: Double?
 
     private let lumPSO, depthPSO, geoPSO, codePSO, downPSO, blurPSO, compositePSO, snapshotPSO: MTLRenderPipelineState
+    private let maskPSO, spacePSO, materialPSO: MTLRenderPipelineState
     private let sampler: MTLSamplerState
     private let glyphSampler: MTLSamplerState
     private let atlas: GlyphAtlas
@@ -98,6 +132,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var geoTex: MTLTexture?
     private var depthSize = (0, 0)
     private let flatGeo: MTLTexture
+    private var spaceTex: MTLTexture?
+    private var maskSmooth: [MTLTexture] = []
+    private var maskIndex = 0
+    private var maskSize = (0, 0)
+    private var compositeParams = CompositeParams()
 
     private var transitionStart: Double = -100
     private let clockStart = CACurrentMediaTime()
@@ -107,10 +146,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.device = device
         queue = device.makeCommandQueue()!
 
-        guard let url = Bundle.main.url(forResource: "Shaders", withExtension: "metal")
-            ?? Renderer.devShaderURL(),
-              let source = try? String(contentsOf: url, encoding: .utf8)
-        else { throw RendererError.shaderSourceMissing }
+        guard let source = Renderer.shaderSource() else { throw RendererError.shaderSourceMissing }
         let library = try device.makeLibrary(source: source, options: nil)
 
         func pipeline(_ fragment: String, _ format: MTLPixelFormat) throws -> MTLRenderPipelineState {
@@ -126,6 +162,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         depthPSO = try pipeline("depthFS", .r32Float)
         geoPSO = try pipeline("geoFS", .rgba16Float)
         codePSO = try pipeline("codeFS", .rgba16Float)
+        materialPSO = try pipeline("materialFS", .rgba16Float)
+        maskPSO = try pipeline("maskFS", .r16Float)
+        spacePSO = try pipeline("spaceFS", .rgba16Float)
         downPSO = try pipeline("downFS", .rgba16Float)
         blurPSO = try pipeline("blurFS", .rgba16Float)
         compositePSO = try pipeline("compositeFS", outputFormat)
@@ -158,14 +197,23 @@ final class Renderer: NSObject, MTKViewDelegate {
         super.init()
     }
 
-    /// When running the bare binary from the project folder during development.
-    private static func devShaderURL() -> URL? {
+    /// The shader files, in the order they're concatenated (later ones use helpers from earlier ones).
+    private static let shaderFiles = ["Shaders", "Space", "Materials"]
+
+    private static func shaderSource() -> String? {
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-        let candidates = [
-            exe.deletingLastPathComponent().appendingPathComponent("../Resources/Shaders.metal"),
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources/Shaders.metal"),
+        let devDirs = [
+            exe.deletingLastPathComponent().appendingPathComponent("../Resources"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources"),
         ]
-        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+        var parts: [String] = []
+        for name in shaderFiles {
+            let url = Bundle.main.url(forResource: name, withExtension: "metal")
+                ?? devDirs.map { $0.appendingPathComponent("\(name).metal") }.first { FileManager.default.fileExists(atPath: $0.path) }
+            guard let url, let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            parts.append(text)
+        }
+        return parts.joined(separator: "\n")
     }
 
     var now: Double { CACurrentMediaTime() - clockStart }
@@ -174,6 +222,21 @@ final class Renderer: NSObject, MTKViewDelegate {
     func toggleMatrix() {
         transitionStart = now
         matrixOn.toggle()
+    }
+
+    /// Test hook: the geometry texture's contents (depth, normal x, normal y, edge) as half floats.
+    func debugReadGeometry() -> (w: Int, h: Int, data: [Float16])? {
+        guard let geoTex, let cmd = queue.makeCommandBuffer() else { return nil }
+        let w = geoTex.width, h = geoTex.height
+        let copy = makeTexture(w, h, .rgba16Float, [.shaderRead], storage: .shared)
+        guard let blit = cmd.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: geoTex, to: copy)
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        var data = [Float16](repeating: 0, count: w * h * 4)
+        copy.getBytes(&data, bytesPerRow: w * 8, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        return (w, h, data)
     }
 
     func requestSnapshot(_ handler: @escaping (CGImage) -> Void) {
@@ -249,11 +312,31 @@ final class Renderer: NSObject, MTKViewDelegate {
         lastFrameTime = time
         depthProgress = min(max(depthProgress + (depthRaw != nil ? dt : -dt) / 1.4, 0), 1)
         u.depthFade = Float(depthProgress * depthProgress * (3 - 2 * depthProgress))
-        let ease = Float(dt == 0 ? 1 : min(dt / 0.25, 1))
-        baseColor += (theme.base - baseColor) * ease
-        hotColor += (theme.hot - hotColor) * ease
-        (u.baseR, u.baseG, u.baseB) = (baseColor.x, baseColor.y, baseColor.z)
-        (u.hotR, u.hotG, u.hotB) = (hotColor.x, hotColor.y, hotColor.z)
+
+        // Changing look: dip to black, swap while it's dark, come back up.
+        var fade = 1.0
+        if style != shownStyle {
+            fadeOut += dt
+            fade = max(1 - fadeOut / 0.14, 0)
+            if fadeOut >= 0.14 {
+                shownStyle = style
+                fadeOut = 0
+                fadeIn = 0
+            }
+        } else if fadeIn < 0.3 {
+            fadeIn += dt
+            let x = min(fadeIn / 0.3, 1)
+            fade = x * x * (3 - 2 * x)
+        }
+        (u.baseR, u.baseG, u.baseB) = (shownStyle.base.x, shownStyle.base.y, shownStyle.base.z)
+        (u.hotR, u.hotG, u.hotB) = (shownStyle.hot.x, shownStyle.hot.y, shownStyle.hot.z)
+        u.style = shownStyle.shaderID
+        u.matrixLook = shownStyle.isMatrix ? 1 : 0
+
+        let maskRaw = spaceEnabled ? maskFrame?() : nil
+        u.spaceOn = spaceEnabled ? 1 : 0
+        u.bhOn = spaceEnabled && blackHoleEnabled ? 1 : 0
+        u.maskOn = maskRaw != nil ? 1 : 0
         u.camAspect = camAspect
         u.cellQ = 2 * u.zRef * (u.tanX / camAspect) * u.camScaleY / rows
 
@@ -300,16 +383,38 @@ final class Renderer: NSObject, MTKViewDelegate {
             geometry = geoTex  // depth switched off: keep the last geometry while morphing back to flat
         }
 
-        // 3. Digital rain, mapped onto the surfaces.
-        pass(cmd, codeTex, codePSO) { enc in
+        // 3. Outer space (stars, black hole) and the cut-out of you to put in front of it.
+        var spaceTexture = blackTexture
+        var maskTexture = blackTexture
+        if spaceEnabled, let spaceTex {
+            pass(cmd, spaceTex, spacePSO) { enc in
+                enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+            }
+            spaceTexture = spaceTex
+            if let maskRaw {
+                ensureMaskTextures(maskRaw.width, maskRaw.height)
+                let smooth = maskSmooth[maskIndex], prevSmooth = maskSmooth[1 - maskIndex]
+                maskIndex = 1 - maskIndex
+                pass(cmd, smooth, maskPSO) { enc in
+                    enc.setFragmentTexture(maskRaw, index: 0)
+                    enc.setFragmentTexture(prevSmooth, index: 1)
+                }
+                maskTexture = smooth
+            }
+        }
+
+        // 4. The look itself: digital rain, or a material, mapped onto the surfaces.
+        pass(cmd, codeTex, shownStyle.isMatrix ? codePSO : materialPSO) { enc in
             enc.setFragmentTexture(lum, index: 0)
             enc.setFragmentTexture(self.atlas.texture, index: 1)
             enc.setFragmentTexture(cam, index: 2)
             enc.setFragmentTexture(geometry, index: 3)
+            enc.setFragmentTexture(spaceTexture, index: 4)
+            enc.setFragmentTexture(maskTexture, index: 5)
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         }
 
-        // 4. Glow at 1/4 and 1/8 resolution.
+        // 5. Glow at 1/4 and 1/8 resolution.
         down(cmd, from: codeTex, to: bloomA)
         blur(cmd, from: bloomA, to: bloomB, dir: SIMD2(1, 0), spread: 1.0)
         blur(cmd, from: bloomB, to: bloomA, dir: SIMD2(0, 1), spread: 1.0)
@@ -317,18 +422,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         blur(cmd, from: bloomC, to: bloomD, dir: SIMD2(1, 0), spread: 1.6)
         blur(cmd, from: bloomD, to: bloomC, dir: SIMD2(0, 1), spread: 1.6)
 
-        // 5. Composite to screen.
+        // 6. Composite to screen.
+        compositeParams = CompositeParams(glow: glow, bloomK: shownStyle.bloom, toneMode: shownStyle.toneMode, fade: Float(fade))
         encodeComposite(into: cmd, target: target, pso: compositePSO)
     }
 
     private func encodeComposite(into cmd: MTLCommandBuffer, target: MTLTexture, pso: MTLRenderPipelineState) {
         guard let codeTex, let bloomA, let bloomC else { return }
-        var glow = self.glow
+        var params = compositeParams
         pass(cmd, target, pso) { enc in
             enc.setFragmentTexture(codeTex, index: 0)
             enc.setFragmentTexture(bloomA, index: 1)
             enc.setFragmentTexture(bloomC, index: 2)
-            enc.setFragmentBytes(&glow, length: MemoryLayout<Float>.stride, index: 0)
+            enc.setFragmentBytes(&params, length: MemoryLayout<CompositeParams>.stride, index: 0)
         }
     }
 
@@ -375,6 +481,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         bloomB = makeTexture(max(w / 4, 1), max(h / 4, 1), .rgba16Float)
         bloomC = makeTexture(max(w / 8, 1), max(h / 8, 1), .rgba16Float)
         bloomD = makeTexture(max(w / 8, 1), max(h / 8, 1), .rgba16Float)
+        spaceTex = makeTexture(w, h, .rgba16Float)
+    }
+
+    private func ensureMaskTextures(_ w: Int, _ h: Int) {
+        guard maskSize != (w, h) else { return }
+        maskSize = (w, h)
+        maskSmooth = (0..<2).map { _ in makeTexture(w, h, .r16Float) }
+        clear(maskSmooth, to: 0)
     }
 
     private func ensureDepthTextures(_ w: Int, _ h: Int) {

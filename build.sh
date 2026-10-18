@@ -12,8 +12,8 @@ swiftc -O -swift-version 5 -target arm64-apple-macos14.0 \
     -o "$APP/Contents/MacOS/MatrixEyes"
 
 cp Info.plist "$APP/Contents/Info.plist"
-cp Resources/Shaders.metal "$APP/Contents/Resources/"
-cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
+cp Resources/*.metal "$APP/Contents/Resources/"
+cp THIRD_PARTY_NOTICES.md LICENSE "$APP/Contents/Resources/"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 
 # Depth model (Apple's Depth Anything V2 Small, Core ML). Compiled once, then reused.

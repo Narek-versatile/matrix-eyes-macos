@@ -33,6 +33,22 @@ struct Uniforms {
     // --- color theme
     float baseR, baseG, baseB;  // glyph color; the tone curve rolls it off toward white
     float hotR, hotG, hotB;     // stream heads and sparkles
+    // --- style / space
+    float style;             // 0 = matrix rain, otherwise the material id (see Materials.metal)
+    float spaceOn;           // 1 = everything except the subject is replaced by outer space
+    float bhOn;              // 1 = a black hole sits in that space
+    float maskOn;            // 1 = a subject mask is available
+    float bhX, bhY;          // black hole position on screen (uv)
+    float bhTanV;            // vertical tan(half fov) of the black-hole camera
+    float bhElev;            // that camera's elevation above the accretion disk, radians
+    float matrixLook;        // 1 for the Matrix styles
+};
+
+struct CompositeParams {
+    float glow;              // user glow strength
+    float bloomK;            // this style's glow
+    float toneMode;          // 0 matrix curve, 1 filmic, 2 plain
+    float fade;              // 0..1, dips to black briefly when the style changes
 };
 
 struct VOut {
@@ -73,6 +89,13 @@ static float2 texUV(float2 c, constant Uniforms& u) {
 
 static float2 camUV(float2 uv, constant Uniforms& u) {
     return texUV(dispUV(uv, u), u);
+}
+
+// How much of this pixel belongs to the subject (1 = keep the styled scene, 0 = show space).
+static float subjectFG(texture2d<float> mask, float2 ct, constant Uniforms& u, sampler s) {
+    if (u.spaceOn < 0.5) return 1.0;
+    if (u.maskOn < 0.5) return 0.0;
+    return smoothstep(0.35, 0.65, mask.sample(s, ct).r);
 }
 
 // View ray through camera-image uv c, with z = 1 (x right, y down, z forward).
@@ -136,6 +159,17 @@ fragment float4 depthFS(VOut in [[stage_in]],
     return float4(mix(old, z, saturate(k)), 0.0, 0.0, 1.0);
 }
 
+// Subject mask: smooth the person cut-out over time so its edge doesn't shimmer.
+fragment float4 maskFS(VOut in [[stage_in]],
+                       texture2d<float> raw [[texture(0)]],
+                       texture2d<float> prev [[texture(1)]],
+                       sampler s [[sampler(0)]])
+{
+    float m = raw.sample(s, in.uv).r;
+    float p = prev.sample(s, in.uv).r;
+    return float4(mix(p, m, 0.6), 0.0, 0.0, 1.0);
+}
+
 // Pass 3: geometry. Depth -> camera-space surface normal and silhouette edges.
 // Output: (depth, normal.x, normal.y, edge); normal.z is rebuilt as facing the camera.
 
@@ -159,9 +193,16 @@ fragment float4 geoFS(VOut in [[stage_in]],
     float3 dn = posAt(depth, p + int2(0, r), size, u);
 
     // One-sided differences on the smoother side keep normals from smearing across silhouettes.
+    // At the image border only the inner side exists (the clamped one would be a zero vector).
     float3 dx = abs(rt.z - c.z) < abs(c.z - l.z) ? rt - c : c - l;
     float3 dy = abs(dn.z - c.z) < abs(c.z - up.z) ? dn - c : c - up;
-    float3 n = normalize(cross(dy, dx));
+    if (p.x < r) dx = rt - c;
+    if (p.x >= size.x - r) dx = c - l;
+    if (p.y < r) dy = dn - c;
+    if (p.y >= size.y - r) dy = c - up;
+    float3 cr = cross(dy, dx);
+    float crLen = length(cr);
+    float3 n = crLen > 1e-12 ? cr / crLen : float3(0.0, 0.0, -1.0);
     if (dot(n, c) > 0.0) n = -n;
 
     float jump = max(max(abs(rt.z - c.z), abs(l.z - c.z)), max(abs(dn.z - c.z), abs(up.z - c.z))) / c.z;
@@ -275,6 +316,8 @@ fragment float4 codeFS(VOut in [[stage_in]],
                        texture2d<float> atlas [[texture(1)]],
                        texture2d<float> cam [[texture(2)]],
                        texture2d<float> geo [[texture(3)]],
+                       texture2d<float> space [[texture(4)]],
+                       texture2d<float> mask [[texture(5)]],
                        constant Uniforms& u [[buffer(0)]],
                        sampler s [[sampler(0)]],
                        sampler glyphSampler [[sampler(1)]])
@@ -359,6 +402,11 @@ fragment float4 codeFS(VOut in [[stage_in]],
         v += c.v * wt.y; w += c.w * wt.y; m += c.m * wt.y;
     }
     float3 matrixCol = colorize(v, w, u);
+    if (u.spaceOn > 0.5) {
+        // Stars take on a hint of the theme color so the two layers belong together.
+        float3 tint = mix(float3(1.0), float3(u.baseR, u.baseG, u.baseB), 0.45);
+        matrixCol = mix(space.sample(s, in.uv).rgb * tint, matrixCol, subjectFG(mask, ct, u, s));
+    }
 
     float2 rv = reveal(floor(px / cs), u.resY / u.cellH, u);
     float3 raw = cam.sample(s, ct).rgb * u.camFade;
@@ -397,23 +445,39 @@ fragment float4 blurFS(VOut in [[stage_in]],
 }
 
 // ---------------------------------------------------------------------------
-// Final composite: code + glow, filmic roll-off, vignette.
+// Final composite: code + glow, tone curve, vignette.
+
+static float3 aces(float3 x) {
+    return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
+}
 
 fragment float4 compositeFS(VOut in [[stage_in]],
                             texture2d<float> code [[texture(0)]],
                             texture2d<float> bloomNear [[texture(1)]],
                             texture2d<float> bloomFar [[texture(2)]],
-                            constant float& glow [[buffer(0)]],
+                            constant CompositeParams& cp [[buffer(0)]],
                             sampler s [[sampler(0)]])
 {
     float4 c = code.read(uint2(in.pos.xy));
-    float3 bloom = (bloomNear.sample(s, in.uv).rgb * 0.7 + bloomFar.sample(s, in.uv).rgb * 0.5) * glow;
+    float3 bloom = (bloomNear.sample(s, in.uv).rgb * 0.7 + bloomFar.sample(s, in.uv).rgb * 0.5) * cp.glow * cp.bloomK;
+    float3 sum = c.rgb + bloom;
 
-    float3 graded = 1.0 - exp(-(c.rgb + bloom) * 1.25);
+    float3 graded;
+    float vigAmount;
+    if (cp.toneMode < 0.5) {            // digital rain
+        graded = 1.0 - exp(-sum * 1.25);
+        vigAmount = 0.5;
+    } else if (cp.toneMode < 1.5) {     // materials: filmic curve, then display gamma
+        graded = pow(aces(sum), float3(1.0 / 2.2));
+        vigAmount = 0.28;
+    } else {                            // doodle: paper white stays white
+        graded = saturate(sum);
+        vigAmount = 0.12;
+    }
     float2 q = in.uv - 0.5;
-    float vig = mix(0.5, 1.0, smoothstep(0.85, 0.2, length(q * float2(1.15, 1.0))));
+    float vig = mix(1.0 - vigAmount, 1.0, smoothstep(0.85, 0.2, length(q * float2(1.15, 1.0))));
     graded *= vig;
 
     float3 outc = mix(c.rgb + bloom * 0.6, graded, c.a);
-    return float4(outc, 1.0);
+    return float4(outc * cp.fade, 1.0);
 }
